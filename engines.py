@@ -1,10 +1,10 @@
 # conda install -c conda-forge slim=4.0
 import inspect
-import os
 import shlex
-import shutil
 import tempfile
 from typing import Dict, Iterable, Optional, Sequence
+import stdpopsim as sps
+import warnings
 
 # Python < 3.10: swallow ignore_cleanup_errors so stdpopsim's SLiM engine works.
 if "ignore_cleanup_errors" not in inspect.signature(tempfile.TemporaryDirectory.__init__).parameters:
@@ -15,8 +15,7 @@ if "ignore_cleanup_errors" not in inspect.signature(tempfile.TemporaryDirectory.
 
     tempfile.TemporaryDirectory.__init__ = _patched_init
 
-import stdpopsim as sps
-import warnings
+
 warnings.filterwarnings("ignore")
 
 

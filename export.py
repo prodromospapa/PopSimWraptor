@@ -10,7 +10,7 @@ from collections import Counter
 
 
 def ts2sfs(ts, folded, normalized):
-    sfs_result = ts.allele_frequency_spectrum(polarised=not folded)
+    sfs_result = ts.allele_frequency_spectrum(polarised=not folded,span_normalise=False)
     if normalized:
         sfs_result = sfs_result / sfs_result.sum()
     sfs_result = sfs_result[1:-1]  # exclude monomorphic

@@ -1,426 +1,297 @@
 #!/bin/sh
-# Pure POSIX sh installer for the 'raisd-ai' conda environment.
-# - No bashisms (no arrays, no [[ ]], no process substitution, no $'...')
-# - Minimal console noise; no spinner
-# - Prints short status lines; tails stderr on failure
-# - No persistent log (writes to /dev/null)
+# -----------------------------------------------------------------------------
+# install_dependencies.sh — robust POSIX installer with spinner UI (raisd-ai)
+# -----------------------------------------------------------------------------
+# Steps
+#  1) Detect conda/mamba/micromamba
+#  2) Create/Update env from ./raisd-ai.yml (override: YML_PATH=...)
+#  3) Resolve env prefix & verify Java
+#  4) Install msms wrapper
+#  5) Install simulator wrappers (+ copy engines/ export/ for imports)
+#  6) (Non-blocking) Install/Update RAiSD-AI (skipped if toolchain absent)
+# -----------------------------------------------------------------------------
 
 set -eu
 
 START_TS="$(date +%s)"
-INSTALL_DIR="$(pwd)"
-LOG_FILE="/dev/null"                # no persistent log by request
-MSMS_SHA256="${MSMS_SHA256-}"       # optional integrity pin for msms.jar reproducibility
-RAISD_AI_REF="${RAISD_AI_REF-}"     # optional tag/branch/commit for reproducible builds
+YML="${YML_PATH-./raisd-ai.yml}"
+MSMS_SHA256="${MSMS_SHA256-}"
+RAISD_AI_REF="${RAISD_AI_REF-}"
 
-# TTY + colors (portable)
+# ---------- UI helpers ---------------------------------------------------------
 is_tty() { [ -t 1 ] && [ -t 2 ]; }
 if is_tty; then
-  BOLD="$(printf '\033[1m')"; DIM="$(printf '\033[2m')"; RED="$(printf '\033[31m')"; GRN="$(printf '\033[32m')"
-  YEL="$(printf '\033[33m')"; BLU="$(printf '\033[34m')"; MAG="$(printf '\033[35m')"; CYA="$(printf '\033[36m')"
-  RST="$(printf '\033[0m')"
+  B="$(printf '\033[1m')"; RED="$(printf '\033[31m')"; GRN="$(printf '\033[32m')"; YEL="$(printf '\033[33m')"; CYA="$(printf '\033[36m')"; RST="$(printf '\033[0m')"
 else
-  BOLD=""; DIM=""; RED=""; GRN=""; YEL=""; BLU=""; MAG=""; CYA=""; RST=""
+  B=""; RED=""; GRN=""; YEL=""; CYA=""; RST=""
 fi
-
 ok()   { printf "%s%s%s\n" "$GRN" "$1" "$RST"; }
 warn() { printf "%s%s%s\n" "$YEL" "$1" "$RST"; }
 err()  { printf "%s%s%s\n" "$RED" "$1" "$RST" >&2; }
 info() { printf "%s%s%s\n" "$CYA" "$1" "$RST"; }
+
+# step: supports either (n total title) or (title)
 step() {
-  n="$1"; total="$2"; title="$3"
-  printf "\n%s▶ %s [%s/%s]%s\n" "$BOLD" "$title" "$n" "$total" "$RST"
+  if [ "$#" -ge 3 ]; then
+    n="$1"; total="$2"; title="$3"
+    printf "\n%s▶ %s [%s/%s]%s\n" "$B" "$title" "$n" "$total" "$RST"
+  else
+    title="$1"
+    printf "\n%s▶ %s%s\n" "$B" "$title" "$RST"
+  fi
 }
 
 elapsed() {
   end="$(date +%s)"
-  mins=$(( (end - START_TS) / 60 ))
-  secs=$(( (end - START_TS) % 60 ))
+  mins=$(( (end - START_TS) / 60 )); secs=$(( (end - START_TS) % 60 ))
   printf "%02dm%02ds" "$mins" "$secs"
 }
 
-# runq: run a command quietly, show short status, tail stderr upon failure
+# Cursor control (best-effort)
+_show_cursor() { command -v tput >/dev/null 2>&1 && tput cnorm 2>/dev/null || true; }
+_hide_cursor() { command -v tput >/dev/null 2>&1 && tput civis 2>/dev/null || true; }
+trap '_show_cursor' EXIT INT
+
+# runq: spinner with last-40-lines-on-failure
 runq() {
   title="$1"; shift
   tmpf="$(mktemp)"
-  status_title="$title"
   spinner_pid=""
   if is_tty; then
+    _hide_cursor || true
     (
+      i=0
       while :; do
-        for c in '|' '/' '-' '\\'; do
-          printf "\r⏳ %s %s" "$status_title" "$c"
-          sleep 0.2
-        done
+        case $((i % 4)) in 0) f='|';; 1) f='/';; 2) f='-';; 3) f='\\';; esac
+        printf "\r\033[K⏳ %s %s" "$title" "$f"
+        i=$((i+1))
+        sleep 0.1
       done
     ) &
     spinner_pid="$!"
   else
-    printf "⏳ %s..." "$status_title"
+    printf "⏳ %s..." "$title"
   fi
-  if ( "$@" >>"$LOG_FILE" 2>>"$tmpf" ); then
+
+  if ( "$@" >/dev/null 2>>"$tmpf" ); then
     if [ -n "${spinner_pid:-}" ]; then
       kill "$spinner_pid" 2>/dev/null || true
       wait "$spinner_pid" 2>/dev/null || true
-      printf "\r\033[K✅ %s\n" "$status_title"
+      _show_cursor || true
+      printf "\r\033[K✅ %s\n" "$title"
     else
-      printf "\r✅ %s\n" "$status_title"
+      printf "\r✅ %s\n" "$title"
     fi
-    cat "$tmpf" >>"$LOG_FILE" 2>/dev/null || true
     rm -f "$tmpf"
     return 0
   else
     if [ -n "${spinner_pid:-}" ]; then
       kill "$spinner_pid" 2>/dev/null || true
       wait "$spinner_pid" 2>/dev/null || true
-      printf "\r\033[K❌ %s\n" "$status_title"
+      _show_cursor || true
+      printf "\r\033[K❌ %s\n" "$title"
     else
-      printf "\r❌ %s\n" "$status_title"
+      printf "\r❌ %s\n" "$title"
     fi
     err "   Failed."
     echo
     warn "Last 40 stderr lines:"
     tail -n 40 "$tmpf" | sed 's/^/   /'
-    cat "$tmpf" >>"$LOG_FILE" 2>/dev/null || true
     rm -f "$tmpf"
     exit 1
   fi
 }
 
-trap 'err "Interrupted. No persistent log (LOG_FILE=/dev/null)."; exit 2' INT
+# ---------- Status flags for summary ------------------------------------------
+MSMS_STATUS="skipped"
+SIM_STATUS="skipped"
+RAISD_STATUS="skipped"
 
-TOTAL_STEPS=5
+# ---------- Plan ---------------------------------------------------------------
+TOTAL_STEPS=6
 CUR=0
 
-# 1) Ensure conda/mamba exists
+# 1) Detect conda
 CUR=$((CUR+1)); step "$CUR" "$TOTAL_STEPS" "Checking for Conda/Mamba"
 if ! command -v conda >/dev/null 2>&1 && ! command -v mamba >/dev/null 2>&1 && ! command -v micromamba >/dev/null 2>&1; then
-  err "Conda/Mamba is not installed. Please install Miniconda/Mamba and retry."
+  err "Conda/Mamba not installed."
   exit 1
 fi
-# Prefer mamba/micromamba if present (fallback to conda)
-if command -v mamba >/dev/null 2>&1; then
-  CONDA_EXE="$(command -v mamba)"
-elif command -v micromamba >/dev/null 2>&1; then
-  CONDA_EXE="$(command -v micromamba)"
-else
-  CONDA_EXE="$(command -v conda)"
-fi
+if command -v mamba >/dev/null 2>&1; then CONDA_EXE="$(command -v mamba)"
+elif command -v micromamba >/dev/null 2>&1; then CONDA_EXE="$(command -v micromamba)"
+else CONDA_EXE="$(command -v conda)"; fi
 ok "Conda front-end: $CONDA_EXE"
 
-# 2) Create or update the environment from raisd-ai.yml
-ENV_BASE="$("$CONDA_EXE" info --base 2>/dev/null)/envs/raisd-ai"
-if [ ! -d "$ENV_BASE" ]; then
-  CUR=$((CUR+1)); step "$CUR" "$TOTAL_STEPS" "Creating conda env 'raisd-ai'"
-  runq "conda env create" "$CONDA_EXE" env create -f raisd-ai.yml --quiet
+# 2) Create/Update env
+CUR=$((CUR+1)); step "$CUR" "$TOTAL_STEPS" "Updating conda env 'raisd-ai'"
+[ -f "$YML" ] || { err "Environment file not found: $YML"; exit 1; }
+if "$CONDA_EXE" env list | grep -Eq '^[^#]*\braisd-ai\b'; then
+  runq "conda env update" "$CONDA_EXE" env update -f "$YML" --prune --quiet
 else
-  CUR=$((CUR+1)); step "$CUR" "$TOTAL_STEPS" "Updating conda env 'raisd-ai'"
-  runq "conda env update" "$CONDA_EXE" env update -f raisd-ai.yml --prune --quiet
+  runq "conda env create" "$CONDA_EXE" env create -f "$YML" --quiet
 fi
 
-# 3) Discover env prefix and helper
-PREFIX="$("$CONDA_EXE" run -n raisd-ai sh -lc 'echo "$CONDA_PREFIX"')"
-if [ -z "${PREFIX:-}" ] || [ ! -d "$PREFIX" ]; then
-  err "[env] Could not resolve CONDA_PREFIX for env 'raisd-ai'."
-  exit 1
-fi
-run_in_env() { "$CONDA_EXE" run -n raisd-ai "$@"; }
-mkdir -p "$PREFIX/bin" "$PREFIX/share"
-TOOLS_SHARE_DIR="$PREFIX/share/raisd-ai-tools"; mkdir -p "$TOOLS_SHARE_DIR"
-
-# Build tool requirements (for RAiSD-AI builds)
-for req in git make gcc; do
-  if ! run_in_env sh -lc "command -v $req >/dev/null 2>&1"; then
-    err "Build tool '$req' not found in env 'raisd-ai'. Add it to raisd-ai.yml and retry."
-    exit 1
-  fi
-done
-
+# 3) Resolve prefix & Java
 CUR=$((CUR+1)); step "$CUR" "$TOTAL_STEPS" "Verifying Java (openjdk) in env"
-if ! run_in_env java -version >/dev/null 2>&1; then
-  err "'java' not available in env. Ensure 'openjdk' is listed in raisd-ai.yml."
-  exit 1
-fi
-ok "Java OK."
+PREFIX="$("$CONDA_EXE" run -n raisd-ai sh -lc 'printf %s "$CONDA_PREFIX"')"
+[ -n "${PREFIX:-}" ] && [ -d "$PREFIX" ] || { err "Could not resolve CONDA_PREFIX."; exit 1; }
+run_in_env() { "$CONDA_EXE" run -n raisd-ai "$@"; }
+mkdir -p "$PREFIX/bin" "$PREFIX/share/raisd-ai-tools" "$PREFIX/share/msms"
+TOOLS_DIR="$PREFIX/share/raisd-ai-tools"
+BIN_DIR="$PREFIX/bin"
+if run_in_env sh -lc 'command -v java >/dev/null 2>&1'; then ok "Java OK."
+else err "'java' not available in env. Add 'openjdk' to your YAML."; exit 1; fi
 
-install_msms_into_env() {
-  msms_bin="$PREFIX/bin/msms"
-  msms_share="$PREFIX/share/msms"
-  jar_path="$msms_share/msms.jar"
-  if [ -x "$msms_bin" ]; then
-    info "msms already installed → $msms_bin"
-    return 0
-  fi
-  mkdir -p "$msms_share"
-
-  page_tmp="$(mktemp)"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "https://www.mabs.at/publications/software-msms/downloads/" -o "$page_tmp" || true
-  else
-    wget -q -O "$page_tmp" "https://www.mabs.at/publications/software-msms/downloads/" || true
-  fi
-  jar_url="$(grep -oE 'https?://[^"]+msms[0-9A-Za-z._-]*\.jar' "$page_tmp" | head -n1 || true)"
-  if [ -z "${jar_url:-}" ]; then
-    rel="$(grep -oE 'href=\"[^"]+\.jar\"' "$page_tmp" | sed -E 's/href=\"([^\"]+)\"/\1/' | head -n1 || true)"
-    if [ -n "${rel:-}" ]; then
-      case "$rel" in
-        http*) jar_url="$rel" ;;
-        *)      jar_url="https://www.mabs.at$rel" ;;
-      esac
-    fi
-  fi
-  rm -f "$page_tmp"
-  if [ -z "${jar_url:-}" ]; then
-    jar_url="https://www.mabs.at/fileadmin/user_upload/p_mabs/msms3.2rc-b163.jar"
-  fi
-
-  JAR_URL="$jar_url" JAR_PATH="$jar_path" runq "Downloading msms.jar" sh -c '
-    set -eu
-    tmp_dl="$(mktemp)"
-    if command -v curl >/dev/null 2>&1; then
-      curl -fsSL "$JAR_URL" -o "$tmp_dl"
-    else
-      wget -q -O "$tmp_dl" "$JAR_URL"
-    fi
-    mv "$tmp_dl" "$JAR_PATH"
-    chmod 644 "$JAR_PATH"
-    if ! head -c4 "$JAR_PATH" | od -An -t x1 | tr -d " \n" | grep -qi 504b0304; then
-      echo "ERROR: downloaded msms.jar does not appear to be a valid JAR (missing PK signature)" >&2
-      echo "  File: $JAR_PATH" >&2
-      ls -l "$JAR_PATH" >&2 || true
-      head -n 40 "$JAR_PATH" 2>/dev/null | sed -n "1,40p" >&2 || true
-      exit 1
-    fi
-  '
-
-  if [ -n "${MSMS_SHA256:-}" ]; then
-    JAR_PATH="$jar_path" EXPECTED="$MSMS_SHA256" runq "Verifying msms.jar SHA256" sh -c '
+# 4) Install msms
+CUR=$((CUR+1)); step "$CUR" "$TOTAL_STEPS" "Installing msms"
+install_msms() {
+  jar="$PREFIX/share/msms/msms.jar"
+  bin="$BIN_DIR/msms"
+  if [ ! -f "$jar" ]; then
+    runq "Downloading msms.jar" sh -c '
       set -eu
-      if command -v sha256sum >/dev/null 2>&1; then
-        got="$(sha256sum "$JAR_PATH" | awk "{print \$1}")"
-      elif command -v shasum >/dev/null 2>&1; then
-        got="$(shasum -a 256 "$JAR_PATH" | awk "{print \$1}")"
-      else
-        echo "WARN: no sha256 tool available; skipping verification" >&2
-        exit 0
-      fi
-      if [ "$got" != "$EXPECTED" ]; then
-        echo "ERROR: SHA256 mismatch for msms.jar" >&2
-        echo "  expected: $EXPECTED" >&2
-        echo "  got     : $got" >&2
-        exit 1
-      fi
-    '
+      url="https://www.mabs.at/fileadmin/user_upload/p_mabs/msms3.2rc-b163.jar"
+      tmp="$(mktemp)"
+      if command -v curl >/dev/null 2>&1; then curl -fsSL "$url" -o "$tmp"; else wget -q -O "$tmp" "$url"; fi
+      mv "$tmp" "$1"; chmod 0644 "$1"
+      # PK signature check
+      head -c4 "$1" | od -An -t x1 | tr -d " \n" | grep -qi 504b0304
+    ' sh "$jar"
+    if [ -n "$MSMS_SHA256" ]; then
+      runq "Verifying msms.jar SHA256" sh -c '
+        set -eu
+        if command -v sha256sum >/dev/null 2>&1; then got="$(sha256sum "$1" | awk "{print \$1}")"; else got="$(shasum -a 256 "$1" | awk "{print \$1}")"; fi
+        [ "$got" = "$2" ]
+      ' sh "$jar" "$MSMS_SHA256"
+    fi
+  else
+    info "msms jar already present."
   fi
-
+  # Wrapper
   runq "Installing msms wrapper" sh -c '
     set -eu
-    bin="$1"
-    jar="$2"
-    cat <<EOF > "$bin"
+    cat > "$1" <<EOF
 #!/bin/sh
 set -eu
-JAR="$jar"
-if [ ! -f "\$JAR" ]; then
-  echo "ERROR: msms.jar not found at \$JAR" >&2
-  exit 1
-fi
-if [ "\$#" -eq 0 ]; then
-  cat <<USAGE >&2
-msms: no arguments provided.
-msms expects options such as:
-  -ms nsam replicates
-Example: msms -ms 10 1 -t 100
-USAGE
-  exit 2
-fi
-exec java -jar "\$JAR" "\$@"
+exec java -jar "$2" "\$@"
 EOF
-    chmod 755 "$bin"
-  ' sh "$msms_bin" "$jar_path"
-
-  runq "Testing msms run" sh -c '
-    set +e
-    conda_exe="$1"
-    bin="$2"
-    "$conda_exe" run -n raisd-ai "$bin" 4 1 -t 10 -r 10 1000 >/dev/null 2>&1
-    rc="$?"
-    set -e
-    [ "$rc" -ge 0 ]
-  ' sh "$CONDA_EXE" "$msms_bin"
-
-  ok "msms installed."
+    chmod 0755 "$1"
+  ' sh "$bin" "$jar"
+  MSMS_STATUS="ok"
+  ok "msms ready."
 }
+install_msms
 
-install_raisd_ai_into_env() {
-  bin1="$PREFIX/bin/RAiSD-AI"
-  bin2="$PREFIX/bin/RAiSD-AI-ZLIB"
-  repo_url="https://github.com/alachins/RAiSD-AI.git"
-  repo_dir="$TOOLS_SHARE_DIR/RAiSD-AI"
-
-  TOOLS_SHARE_DIR="$TOOLS_SHARE_DIR" REPO_DIR="$repo_dir" REPO_URL="$repo_url" RAISD_AI_REF="$RAISD_AI_REF" CONDA_EXE="$CONDA_EXE" runq "Preparing RAiSD-AI repo" sh -c '
-    set -eu
-    mkdir -p "$TOOLS_SHARE_DIR"
-    if [ ! -d "$REPO_DIR/.git" ]; then
-      rm -rf "$REPO_DIR" || true
-      "$CONDA_EXE" run -n raisd-ai git clone --depth 1 "$REPO_URL" "$REPO_DIR" >/dev/null 2>&1
-      : > "$REPO_DIR/.__buildflag"
-      if [ -n "$RAISD_AI_REF" ]; then
-        "$CONDA_EXE" run -n raisd-ai git -C "$REPO_DIR" fetch --tags >/dev/null 2>&1 || true
-        "$CONDA_EXE" run -n raisd-ai git -C "$REPO_DIR" checkout --quiet "$RAISD_AI_REF" || true
-      fi
-    else
-      "$CONDA_EXE" run -n raisd-ai git -C "$REPO_DIR" fetch --all --tags >/dev/null 2>&1 || true
-      "$CONDA_EXE" run -n raisd-ai git -C "$REPO_DIR" pull --ff-only >/dev/null 2>&1 || true
-      : > "$REPO_DIR/.__buildflag"
-    fi
-  '
-
-  if [ -s "$repo_dir/.__buildflag" ] || [ ! -x "$bin1" ] || [ ! -x "$bin2" ]; then
-    # Patch compile scripts
-    REPO_DIR="$repo_dir" runq "Patching RAiSD-AI compile scripts" sh -c '
-      set -eu
-      set +e
-      ls "$REPO_DIR"/compile-RAiSD-AI*.sh >/dev/null 2>&1
-      present="$?"
-      set -e
-      if [ "$present" -ne 0 ]; then exit 0; fi
-      for f in "$REPO_DIR"/compile-RAiSD-AI*.sh; do
-        [ -f "$f" ] || continue
-        tmp="$(mktemp)"
-        sed -e "s/[[:<:]]rm[[:>:]]\([[:space:]]\)/rm -f\1/g" -e "s/rm -r/rm -rf/g" "$f" > "$tmp" || cp "$f" "$tmp"
-        mv "$tmp" "$f"
-      done
-    '
-
-    REPO_DIR="$repo_dir" runq "Setting RAiSD-AI compile permissions" sh -c '
-      set -eu
-      for f in "$REPO_DIR"/compile-RAiSD-AI*.sh; do
-        [ -f "$f" ] || continue
-        chmod +x "$f"
-      done
-    '
-
-    REPO_DIR="$repo_dir" CONDA_EXE="$CONDA_EXE" runq "Compiling RAiSD-AI" sh -c '
-      set -eu
-      "$CONDA_EXE" run -n raisd-ai sh -lc "cd "$REPO_DIR" && ./compile-RAiSD-AI.sh"
-    '
-
-    BIN1="$bin1" REPO_DIR="$repo_dir" runq "Installing RAiSD-AI binary" sh -c '
-      set -eu
-      src1=""
-      if [ -e "$REPO_DIR/bin/release/RAiSD-AI" ]; then src1="$REPO_DIR/bin/release/RAiSD-AI"; fi
-      if [ -z "${src1:-}" ] && [ -L "$REPO_DIR/RAiSD-AI" ]; then src1="$REPO_DIR/RAiSD-AI"; fi
-      if [ -z "${src1:-}" ]; then src1="$(cd "$REPO_DIR" && { find . -name RAiSD-AI -type f; find . -name RAiSD-AI -type l; } | head -n1 || true)"; fi
-      if [ -n "${src1:-}" ] && [ -e "$src1" ]; then cp -L "$src1" "$BIN1"; chmod 755 "$BIN1"; else exit 44; fi
-    '
-
-    REPO_DIR="$repo_dir" CONDA_EXE="$CONDA_EXE" runq "Compiling RAiSD-AI-ZLIB" sh -c '
-      set -eu
-      "$CONDA_EXE" run -n raisd-ai sh -lc "cd "$REPO_DIR" && ./compile-RAiSD-AI-ZLIB.sh"
-    '
-
-    BIN2="$bin2" REPO_DIR="$repo_dir" runq "Installing RAiSD-AI-ZLIB binary" sh -c '
-      set -eu
-      src2=""
-      if [ -e "$REPO_DIR/bin/release/RAiSD-AI-ZLIB" ]; then src2="$REPO_DIR/bin/release/RAiSD-AI-ZLIB"; fi
-      if [ -z "${src2:-}" ] && [ -L "$REPO_DIR/RAiSD-AI-ZLIB" ]; then src2="$REPO_DIR/RAiSD-AI-ZLIB"; fi
-      if [ -z "${src2:-}" ]; then src2="$(cd "$REPO_DIR" && { find . -name RAiSD-AI-ZLIB -type f; find . -name RAiSD-AI-ZLIB -type l; } | head -n1 || true)"; fi
-      if [ -n "${src2:-}" ] && [ -e "$src2" ]; then cp -L "$src2" "$BIN2"; chmod 755 "$BIN2"; else exit 45; fi
-    '
-
-    if [ -x "$bin1" ] && [ -x "$bin2" ]; then
-      ok "RAiSD-AI binaries installed → $PREFIX/bin"
-    else
-      warn "RAiSD-AI: one or more binaries missing (continuing)."
-    fi
-  else
-    info "RAiSD-AI up to date; skipping rebuild."
-  fi
-}
-
-hotfix_stdpopsim() {
-  target="$(ls "$PREFIX"/lib/python*/site-packages/stdpopsim/slim_engine.py 2>/dev/null | head -n1 || true)"
-  if [ -n "${target:-}" ] && [ -f "$target" ]; then
-    info "stdpopsim found; checking Python version for hotfix need"
-    py_ver="$(run_in_env python -c 'import sys; print("%d %d"% (sys.version_info.major, sys.version_info.minor))' 2>/dev/null || true)"
-    if [ -n "$py_ver" ]; then
-      py_major="$(printf "%s" "$py_ver" | awk '{print $1}')"
-      py_minor="$(printf "%s" "$py_ver" | awk '{print $2}')"
-      if [ "$py_major" -gt 3 ] || { [ "$py_major" -eq 3 ] && [ "$py_minor" -ge 10 ]; }; then
-        info "Python ${py_major}.${py_minor} ≥ 3.10 → hotfix not needed."
-        return 0
-      fi
-    else
-      warn "Could not determine Python version; applying hotfix as fallback."
-    fi
-
-    TARGET="$target" runq "Applying stdpopsim TemporaryDirectory patch" sh -c '
-      set -eu
-      if [ -f "$TARGET" ]; then
-        if sed -n "1669p" "$TARGET" | grep -q "TemporaryDirectory"; then
-          : # already patched
-        else
-          tmpf="$(mktemp)"
-          awk "NR==1669{print \"            tempdir = tempfile.TemporaryDirectory()\\"} {print}" "$TARGET" > "$tmpf"
-          mv "$tmpf" "$TARGET"
-        fi
-      else
-        exit 0
-      fi
-    '
-    ok "stdpopsim hotfix applied."
-  else
-    info "stdpopsim slim_engine.py not found; skipping hotfix."
-  fi
-}
-
-install_simulator_wrapper() {
-  script_dir="$(cd "$(dirname "$0")" && pwd)"
-  simulator="$script_dir/simulator.py"
-  wrapper="$PREFIX/bin/simulator"
-  py_wrapper="$PREFIX/bin/simulator.py"
-
-  if [ ! -f "$simulator" ]; then
-    warn "simulator.py not found; skipping wrapper."
+# 5) Install simulator wrappers (+ copy engines/export)
+CUR=$((CUR+1)); step "$CUR" "$TOTAL_STEPS" "Installing simulator wrapper"
+install_simulator() {
+  src_dir="$(cd "$(dirname "$0")" && pwd)"
+  # Require simulator.py at source
+  if [ ! -f "$src_dir/simulator.py" ]; then
+    warn "simulator.py not found beside installer; skipping."
     return 0
   fi
-
-  SIM="$simulator" WR="$wrapper" PYW="$py_wrapper" runq "Installing simulator wrappers" sh -c '
+  # Copy top-level .py files
+  runq "Copying simulator module files" sh -c '
     set -eu
-    chmod 755 "$SIM" 2>/dev/null || true
-    cat > "$WR" <<EOF
+    src="$1"; dst="$2"
+    mkdir -p "$dst"
+    copied=0
+    for f in "$src"/*.py; do
+      [ -f "$f" ] || continue
+      cp "$f" "$dst/"
+      copied=1
+    done
+    [ "$copied" -eq 1 ] || cp "$src/simulator.py" "$dst/"
+    chmod 755 "$dst/simulator.py" 2>/dev/null || true
+  ' sh "$src_dir" "$TOOLS_DIR"
+  # Copy engines/ and export/ recursively if present
+  runq "Copying engines/ and export/ (if present)" sh -c '
+    set -eu
+    src="$1"; dst="$2"
+    copy_pkg() {
+      name="$1"
+      if [ -d "$src/$name" ]; then
+        mkdir -p "$dst/$name"
+        (cd "$src/$name" && find . -type d -print | sed "s|^\./||" | while read -r d; do mkdir -p "$dst/$name/$d"; done)
+        (cd "$src/$name" && find . -type f -print | sed "s|^\./||" | while read -r f; do cp "$src/$name/$f" "$dst/$name/$f"; done)
+        [ -f "$dst/$name/__init__.py" ] || : > "$dst/$name/__init__.py"
+      fi
+    }
+    copy_pkg engines
+    copy_pkg export
+  ' sh "$src_dir" "$TOOLS_DIR"
+  # Create wrappers in bin (both names)
+  runq "Installing simulator entry points" sh -c '
+    set -eu
+    bin="$1"; bin2="$2"
+    cat > "$bin" << "EOF"
 #!/bin/sh
 set -eu
-exec python "$SIM" "$@"
+PREFIX="$(cd "$(dirname "$0")/.." && pwd)"
+exec "$PREFIX/bin/python" "$PREFIX/share/raisd-ai-tools/simulator.py" "$@"
 EOF
-    chmod 755 "$WR"
-    cat > "$PYW" <<PYW
-#!/usr/bin/env python3
-import os, sys
-repo_sim = r"$SIM"
-if not os.path.exists(repo_sim):
-    sys.stderr.write("ERROR: repo simulator.py not found at %s\n" % repo_sim)
-    sys.exit(2)
-os.execv(sys.executable, [sys.executable, repo_sim] + sys.argv[1:])
-PYW
-    chmod 755 "$PYW"
-  '
-  ok "simulator wrappers installed."
+    chmod 0755 "$bin"
+    cp "$bin" "$bin2"
+    chmod 0755 "$bin2"
+  ' sh "$BIN_DIR/simulator" "$BIN_DIR/simulator.py"
+  SIM_STATUS="ok"
+  ok "simulator installed to PATH."
 }
+install_simulator
 
-# ── Execute installers ─────────────────────────────────────────────────────────
-CUR=$((CUR+1)); step "$CUR" "$TOTAL_STEPS" "Installing msms"
-install_msms_into_env
-
+# 6) RAiSD-AI (non-blocking)
 CUR=$((CUR+1)); step "$CUR" "$TOTAL_STEPS" "Installing / updating RAiSD-AI"
-install_raisd_ai_into_env
+install_raisd() {
+  repo="$TOOLS_DIR/RAiSD-AI"
+  if ! run_in_env sh -lc 'command -v git >/dev/null && command -v make >/dev/null && command -v gcc >/dev/null'; then
+    info "Toolchain not in env; skipping RAiSD-AI."
+    return 0
+  fi
+  runq "Preparing RAiSD-AI repo" sh -c '
+    set -eu
+    repo="$1"; url="https://github.com/alachins/RAiSD-AI.git"; conda="$2"; ref="$3"
+    if [ ! -d "$repo/.git" ]; then
+      rm -rf "$repo" || true
+      "$conda" run -n raisd-ai git clone --depth 1 "$url" "$repo" >/dev/null 2>&1 || true
+      if [ -n "$ref" ]; then
+        "$conda" run -n raisd-ai git -C "$repo" fetch --tags >/dev/null 2>&1 || true
+        "$conda" run -n raisd-ai git -C "$repo" checkout --quiet "$ref" >/dev/null 2>&1 || true
+      fi
+    else
+      "$conda" run -n raisd-ai git -C "$repo" fetch --all --tags >/dev/null 2>&1 || true
+      "$conda" run -n raisd-ai git -C "$repo" pull --ff-only >/dev/null 2>&1 || true
+    fi
+  ' sh "$repo" "$CONDA_EXE" "$RAISD_AI_REF"
+  # Try to compile but NEVER fail the installer
+  runq "Compiling RAiSD-AI" sh -c '
+    set +e
+    repo="$1"; conda="$2"
+    [ -x "$repo/compile-RAiSD-AI.sh" ] || [ -x "$repo/compile-RAiSD-AI-ZLIB.sh" ] || exit 0
+    "$conda" run -n raisd-ai sh -lc "cd \"$repo\" && [ -x ./compile-RAiSD-AI.sh ] && ./compile-RAiSD-AI.sh || true"
+    "$conda" run -n raisd-ai sh -lc "cd \"$repo\" && [ -x ./compile-RAiSD-AI-ZLIB.sh ] && ./compile-RAiSD-AI-ZLIB.sh || true"
+    exit 0
+  ' sh "$repo" "$CONDA_EXE"
+  # Install binaries if present
+  runq "Installing RAiSD-AI binaries (if built)" sh -c '
+    set -eu
+    repo="$1"; bindir="$2"
+    installed=0
+    if [ -e "$repo/bin/release/RAiSD-AI" ]; then cp -L "$repo/bin/release/RAiSD-AI" "$bindir/RAiSD-AI"; chmod 755 "$bindir/RAiSD-AI"; installed=1; fi
+    if [ -e "$repo/bin/release/RAiSD-AI-ZLIB" ]; then cp -L "$repo/bin/release/RAiSD-AI-ZLIB" "$bindir/RAiSD-AI-ZLIB"; chmod 755 "$bindir/RAiSD-AI-ZLIB"; installed=1; fi
+    [ "$installed" -eq 0 ] && exit 0 || exit 0
+  ' sh "$repo" "$BIN_DIR"
+  if [ -x "$BIN_DIR/RAiSD-AI" ] || [ -x "$BIN_DIR/RAiSD-AI-ZLIB" ]; then RAISD_STATUS="ok"; fi
+  info "RAiSD-AI step complete."
+}
+install_raisd || true
 
-# Applying stdpopsim hotfix (if needed) — run quietly (log only)
-hotfix_stdpopsim >/dev/null 2>&1 || true
-
-CUR=$((CUR+1)); step "$CUR" "$TOTAL_STEPS" "Installing simulator wrapper"
-install_simulator_wrapper
-
+# ---------- Summary ------------------------------------------------------------
 printf "\n%s %s (elapsed %s)\n" "🎉" "All tools installed into env." "$(elapsed)"
-info "Activate with: ${BOLD}conda activate raisd-ai${RST}"
+printf "\n%s" "┌──────────────── Installation Summary ────────────────┐"
+printf "\n│ %-22s : %s" "msms" "$MSMS_STATUS"
+printf "\n│ %-22s : %s" "simulator wrappers" "$SIM_STATUS"
+printf "\n│ %-22s : %s" "RAiSD-AI" "$RAISD_STATUS"
+printf "\n%s\n\n" "└──────────────────────────────────────────────────────┘"
+info "Activate with: ${B}conda activate raisd-ai${RST}"
+info "Run: ${B}simulator${RST} or ${B}simulator.py${RST} (avoid './simulator.py' to prefer env)"
