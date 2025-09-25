@@ -8,7 +8,7 @@
 #  3) Resolve env prefix & verify Java
 #  4) Install msms wrapper
 #  5) Install simulator wrappers (+ copy engines/ export/ for imports)
-#  6) (Non-blocking) Install/Update RAiSD-AI (skipped if toolchain absent)
+#  6) Install/Update RAiSD-AI (skipped if toolchain absent)
 # -----------------------------------------------------------------------------
 
 set -eu
