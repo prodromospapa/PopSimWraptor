@@ -334,7 +334,7 @@ if engine == "slim" or engine == "msms":
             sweep_pop_start_time =  msprime_simulation(species_std,model_std,chromosome,1,{p: 1 for p in sim_populations}).max_time
 
         if sweep_time == "beginning":
-            sweep_time = math.ceil(sweep_pop_start_time)
+            sweep_time = int(sweep_pop_start_time)
 
         if sweep_time > sweep_pop_start_time:
             raise ValueError(f"--sweep-time {sweep_time} is older than the start time of the sweep population {sweep_population} ({sweep_pop_start_time})")
