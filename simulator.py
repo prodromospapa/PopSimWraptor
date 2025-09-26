@@ -357,6 +357,8 @@ contig = species_std.get_contig(chromosome,mutation_rate=model_std.mutation_rate
 
 N0 = [pop.initial_size for pop in model_std.populations if pop.name == ref_population][0]
 mutation_rate = model_std.mutation_rate
+if not mutation_rate:
+    mutation_rate = contig.mutation_rate
 recombination_rate = contig.recombination_map.mean_rate
 ploidy = species_std.ploidy
 
