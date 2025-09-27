@@ -185,7 +185,7 @@ def format_metadata(m,info_file=None, vcf=False):
            f"populations={'|'.join(map(str,m['populations']))}, " \
            f"sample_counts={'|'.join(map(str,m['sample_counts']))}, " \
            f"hap_counts={'|'.join(map(str,m['hap_counts']))}"
-    params = f"length={m['length']}, mu={m['mu']}, r={m['r']}, ploidy={m['ploidy']}, chromosome={m['chromosome']}"
+    params = f"length={m['length']}, mu={m['mu']}, r={m['r']}, theta={m['theta']}, rho={m['rho']},ploidy={m['ploidy']}, chromosome={m['chromosome']}"
     if list(m.keys())[-1] == "fixation_time":
         sel = f"sweep_pos_bp={m['sweep_pos_bp']}, sel_s={m['sel_s']}, sweep_time={m['sweep_time']}, fixation_time={m['fixation_time']}"
     else:
