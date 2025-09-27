@@ -62,7 +62,7 @@ runq() {
     (
       i=0
       while :; do
-        case $((i % 4)) in 0) f='|';; 1) f='/';; 2) f='-';; 3) f='\\';; esac
+        case $((i % 4)) in 0) f='|';; 1) f='/';; 2) f='-';; 3) f="\\";; esac
         printf "\r\033[K⏳ %s %s" "$title" "$f"
         i=$((i+1))
         sleep 0.1
