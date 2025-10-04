@@ -5,6 +5,7 @@ import tempfile
 from typing import Dict, Iterable, Optional, Sequence
 import stdpopsim as sps
 import warnings
+import math
 
 # Python < 3.10: swallow ignore_cleanup_errors so stdpopsim's SLiM engine works.
 if "ignore_cleanup_errors" not in inspect.signature(tempfile.TemporaryDirectory.__init__).parameters:
@@ -119,6 +120,19 @@ def msms_command(
 
     replicates = max(1, int(replicates or 1))
 
+    # determine if any events will create temporary populations (partial mass-migration)
+    events: Iterable[Dict] = list(
+        sorted(demo_dict.get("events", []), key=lambda e: e.get("time", 0.0))
+    )
+    num_temp_pops = 0
+    for e in events:
+        if "proportion" in e:
+            fraction = float(e.get("proportion", 0.0))
+            if not math.isclose(fraction, 1.0, rel_tol=1e-9, abs_tol=0.0):
+                num_temp_pops += 1
+
+    total_pops = max(1, len(pops) + num_temp_pops)
+
     cmd = [
         "msms",
         str(n),
@@ -129,9 +143,13 @@ def msms_command(
         f"{rho}",
         str(L),
         "-I",
-        str(len(pops) or 1),
+        str(total_pops),
     ]
-    cmd += [str(c) for c in (counts if counts else [ploidy])]
+    # pad counts for any temporary populations (they have no samples)
+    pad_counts = counts if counts else [ploidy]
+    if num_temp_pops:
+        pad_counts = list(pad_counts) + [0] * num_temp_pops
+    cmd += [str(c) for c in pad_counts]
 
     time_units = demo_dict.get(
         "time_units", getattr(model_std.model, "time_units", "generations")
@@ -161,18 +179,45 @@ def msms_command(
                         f"{float(rate) * upg * fourNe}",
                     ]
 
-    events: Iterable[Dict] = list(
-        sorted(demo_dict.get("events", []), key=lambda e: e.get("time", 0.0))
-    )
+    # iterate over events and emit msms flags. If a partial proportion is found,
+    # emit an -es (split) to create a temporary population and immediately -ej it
+    # into the destination to model a pulse admixture backward in time.
+    temp_pop_counter = 0
     for e in events:
         t = (float(e.get("time", 0.0)) / upg) / max(fourNe, 1e-12)
         if "proportion" in e:
-            cmd += [
-                "-ej",
-                f"{t}",
-                str(pop_idx(e.get("source")) + 1),
-                str(pop_idx(e.get("dest")) + 1),
-            ]
+            fraction = float(e.get("proportion", 0.0))
+            src_idx = pop_idx(e.get("source"))
+            dst_idx = pop_idx(e.get("dest"))
+            if math.isclose(fraction, 1.0, rel_tol=1e-9, abs_tol=0.0):
+                # full merge as before
+                cmd += [
+                    "-ej",
+                    f"{t}",
+                    str(src_idx + 1),
+                    str(dst_idx + 1),
+                ]
+            else:
+                # create a temporary population by splitting src; set p = fraction remaining
+                # in the original population so the new population holds the migrating fraction
+                p_keep = 1.0 - fraction
+                cmd += [
+                    "-es",
+                    f"{t}",
+                    str(src_idx + 1),
+                    f"{p_keep}",
+                ]
+                # new temporary population index (1-based)
+                new_temp_idx = len(pops) + temp_pop_counter + 1
+                # small epsilon to ensure split happens before join
+                eps = 1e-12
+                cmd += [
+                    "-ej",
+                    f"{t + eps}",
+                    str(new_temp_idx),
+                    str(dst_idx + 1),
+                ]
+                temp_pop_counter += 1
         elif "matrix_index" in e:
             ij = e.get("matrix_index")
             rate = float(e.get("rate", 0.0)) * upg * fourNe
@@ -217,11 +262,11 @@ def msms_command(
             f"{Ne0}",
         ]
 
-        t_sel = (
-            0.0
-            if sweep_time in (None, "beginning")
-            else float(sweep_time) / max(fourNe, 1e-12)
-        )
+        if sweep_time in (None, "beginning"):
+            t_sel = 0.0
+        else:
+            sweep_generations = float(sweep_time) / upg
+            t_sel = sweep_generations / max(fourNe, 1e-12)
         denom = max(float(ploidy) * Ne0, 1.0)
         init_f = max(1.0 / denom, 1e-6)
         vec = ["0"] * max(len(pops), 1)
@@ -259,38 +304,13 @@ def discoal_command(
       - Mutation: -t theta = 4*N0*u*L
       - Population splits: -ed time pop1 pop2 (merge backward in time)
       - Size changes: -en time popID sizeRel
-      - Migration: only *constant* rates supported (`-m` and `-M`), time-varying migration not supported
-      - We currently do *not* enable selection flags via discoal in this pipeline.
+      - Migration: only *constant* rates supported (`-m` and `-M`); time-varying migration is not supported
+      - Selective sweeps (stochastic, via `-ws`) are supported when requested.
+        discoal only models sweeps in population 0 and disallows migration during
+        the sweep; we reorder populations so the requested sweep population is
+        first and reject demographies with migration under selection.
     """
-    # If caller requested a selective sweep, delegate to the msms pipeline
-    # which supports selection; we return the msms command string so the
-    # same downstream pipeline can be used.
-    if any(x is not None for x in (sweep_population, sweep_pos, sweep_time, selection_coeff)):
-        return msms_command(
-            species_std,
-            model_std,
-            chromosome,
-            length,
-            population_dict,
-            sweep_population=sweep_population,
-            sweep_pos=sweep_pos,
-            sweep_time=sweep_time,
-            selection_coeff=selection_coeff,
-            replicates=replicates,
-            contig=contig,
-            pop_models=pop_models,
-            demo_dict=demo_dict,
-        )
-
-    import math
-
-    def pop_idx(name):
-        if isinstance(name, int):
-            return max(0, min(len(pops) - 1, int(name)))
-        for i, p in enumerate(pops):
-            if p.name == name:
-                return i
-        return 0
+    has_selection = sweep_pos is not None
 
     if contig is None:
         contig = species_std.get_contig(
@@ -300,18 +320,50 @@ def discoal_command(
     if demo_dict is None:
         demo_dict = model_std.model.asdict()
 
-    pops: Sequence = pop_models or tuple(model_std.populations)
+    orig_pops: Sequence = tuple(pop_models or tuple(model_std.populations))
+    if not orig_pops:
+        orig_pops = tuple(model_std.populations)
+    pops_list = list(orig_pops)
+
+    if has_selection and pops_list:
+        if sweep_population is None:
+            raise ValueError("discoal sweep simulation requires a sweep population name.")
+        try:
+            sweep_idx = next(i for i, p in enumerate(pops_list) if p.name == sweep_population)
+        except StopIteration as exc:
+            raise ValueError(
+                f"Unknown sweep population '{sweep_population}' for discoal command."
+            ) from exc
+        if sweep_idx != 0:
+            pops_list.insert(0, pops_list.pop(sweep_idx))
+
+    pops: Sequence = tuple(pops_list)
+    name_to_orig_index = {p.name: i for i, p in enumerate(orig_pops)}
+    name_to_index = {p.name: i for i, p in enumerate(pops)}
+    index_map = {
+        orig_idx: name_to_index.get(orig_pops[orig_idx].name, orig_idx)
+        for orig_idx in range(len(orig_pops))
+    }
+    reorder_perm = [
+        name_to_orig_index.get(p.name, idx) for idx, p in enumerate(pops)
+    ]
+
+    def pop_idx(label):
+        if isinstance(label, int):
+            idx = int(label)
+            if idx in index_map:
+                return index_map[idx]
+            return max(0, min(len(pops) - 1, idx))
+        return name_to_index.get(label, 0)
 
     ploidy = int(getattr(species_std, "ploidy", 2))
     L = int(length or getattr(contig, "length", 1)) or 1
 
-    # sample sizes per population are HAPLOID counts
     counts = [int(population_dict.get(p.name, 0)) * ploidy for p in pops]
     if not any(counts) and pops:
         counts = [ploidy] + [0] * (len(pops) - 1)
     n = sum(counts) if counts else ploidy
 
-    # Reference pop with first nonzero sample count
     ref = next((i for i, c in enumerate(counts) if c > 0), 0)
     Ne0 = float(getattr(pops[ref], "initial_size", 1.0) or 1.0)
     fourNe = 2.0 * ploidy * Ne0
@@ -321,7 +373,6 @@ def discoal_command(
     if r is None:
         r = getattr(model_std, "recombination_rate", 0.0) or 0.0
 
-    # Discoal scaling (per msprime docs): theta = 4*N*u*L ; rho = 4*N*r*(L-1)
     theta = fourNe * mu * L
     rho = fourNe * r * max(L - 1, 1)
 
@@ -338,12 +389,10 @@ def discoal_command(
         f"{rho}",
     ]
 
-    # Multiple populations declaration
     if len(pops) > 1:
         cmd += ["-p", str(len(pops))]
         cmd += [str(c) for c in counts]
 
-    # Units: if model time units are years, convert to generations via species generation_time
     time_units = demo_dict.get(
         "time_units", getattr(model_std.model, "time_units", "generations")
     )
@@ -353,35 +402,55 @@ def discoal_command(
     else:
         upg = 1.0
 
-    # Initial constant migration matrix (only present-time supported in discoal; no time-varying rates)
-    migration_matrix = demo_dict.get("migration_matrix")
-    if migration_matrix is not None:
-        # If any later migration change events exist, error out (not supported by discoal)
-        events: Iterable[Dict] = demo_dict.get("events", [])
-        mig_change = any("matrix_index" in e and float(e.get("time", 0.0)) > 0.0 for e in events)
-        if mig_change:
-            raise ValueError("discoal backend does not support time-varying migration rates; adjust demography or use msms/msprime.")
-        for i, row in enumerate(migration_matrix):
-            for j, rate in enumerate(row):
-                if i != j and rate:
-                    cmd += ["-m", str(i), str(j), f"{float(rate) * upg * fourNe}"]
-
-    # Build growth approximation timeline and apply -en size changes
+    events_raw: Iterable[Dict] = demo_dict.get("events", [])
     events: Iterable[Dict] = list(
-        sorted(demo_dict.get("events", []), key=lambda e: e.get("time", 0.0))
+        sorted(events_raw, key=lambda e: e.get("time", 0.0))
     )
 
-    # helper: add -en at time t (in generations) for population i with absolute size Ne_abs
+    migration_matrix_raw = demo_dict.get("migration_matrix")
+    migration_matrix = None
+    if migration_matrix_raw is not None:
+        matrix = [list(row) for row in migration_matrix_raw]
+        expected = len(orig_pops)
+        if expected and len(matrix) != expected:
+            raise ValueError(
+                "discoal migration matrix size does not align with population definitions."
+            )
+        migration_matrix = [
+            [matrix[reorder_perm[i]][reorder_perm[j]] for j in range(len(pops))]
+            for i in range(len(pops))
+        ]
+        mig_change = any(
+            "matrix_index" in e and float(e.get("time", 0.0)) > 0.0 for e in events
+        )
+        if mig_change:
+            raise ValueError(
+                "discoal backend does not support time-varying migration rates; adjust demography or use msms/msprime."
+            )
+        if has_selection:
+            has_migration = any(
+                i != j and float(migration_matrix[i][j])
+                for i in range(len(migration_matrix))
+                for j in range(len(migration_matrix[i]))
+            )
+            if has_migration:
+                raise ValueError(
+                    "discoal backend does not support migration when a selective sweep is simulated; use msms or adjust the demography."
+                )
+        else:
+            for i, row in enumerate(migration_matrix):
+                for j, rate in enumerate(row):
+                    if i != j and rate:
+                        cmd += ["-m", str(i), str(j), f"{float(rate) * upg * fourNe}"]
+
     def add_en(t_generations: float, pop_index: int, Ne_abs: float):
         t = (float(t_generations) / upg) / max(fourNe, 1e-12)
         cmd.extend(["-en", f"{t}", str(pop_index), f"{Ne_abs / Ne0}"])
 
-    # Track per-pop sizes and exponential growth rates (per generation)
     current_sizes = {i: float(getattr(p, "initial_size", Ne0) or Ne0) for i, p in enumerate(pops)}
     current_growth = {i: float(getattr(p, "growth_rate", 0.0) or 0.0) * upg for i, p in enumerate(pops)}
     last_t = 0.0
 
-    # Create a timeline: include all event times and add a grid between them for growth approximation
     change_times = sorted(set([float(e.get("time", 0.0)) for e in events] + [0.0]))
     grid = []
     for a, b in zip(change_times, change_times[1:] + [max(change_times[-1], 0.0)]):
@@ -392,12 +461,25 @@ def discoal_command(
             grid.extend([a + k * step for k in range(1, growth_steps)])
     timeline = sorted(set(change_times + grid))
 
-    # If any populations have initial sizes != Ne0, emit an -en at time 0
     for i, p in enumerate(pops):
         if getattr(p, "initial_size", Ne0) != Ne0:
             add_en(0.0, i, float(getattr(p, "initial_size", Ne0)))
 
-    # Walk the timeline, apply growth and events
+    if has_selection:
+        for e in events:
+            if "matrix_index" in e or "proportion" in e:
+                raise ValueError(
+                    "discoal backend does not support migration or admixture events when sweeps are enabled; use msms or adjust the demography."
+                )
+        if sweep_population not in name_to_index:
+            raise ValueError(
+                f"sweep population '{sweep_population}' is not part of the demographic model."
+            )
+        if name_to_index[sweep_population] != 0:
+            raise ValueError(
+                "discoal can only model sweeps in population 0; reorder the sweep population to be first."
+            )
+
     for t in timeline:
         dt = t - last_t
         if dt > 0.0:
@@ -406,25 +488,28 @@ def discoal_command(
                 if g:
                     current_sizes[i] = current_sizes[i] * (2.718281828459045 ** (g * dt))
                     add_en(t, i, current_sizes[i])
-        # apply discrete events at exact t
         for e in [e for e in events if float(e.get("time", 0.0)) == t]:
             if "proportion" in e:
-                # stdpopsim 'mass migration' with fraction!=1 is NOT supported here (no direct -ea mapping)
                 fraction = float(e.get("proportion", 0.0))
-                if not math.isclose(fraction, 1.0, rel_tol=1e-9, abs_tol=0.0):
-                    raise ValueError(
-                        "discoal backend cannot reproduce partial mass-migration "
-                        f"(proportion={fraction}); use msprime or adjust the demography."
-                    )
                 src = pop_idx(e.get("source"))
                 dst = pop_idx(e.get("dest"))
-                # population split backward (merge src into dst)
                 t_coal = (t / upg) / max(fourNe, 1e-12)
-                cmd += ["-ed", f"{t_coal}", str(src), str(dst)]
+                if math.isclose(fraction, 1.0, rel_tol=1e-9, abs_tol=0.0):
+                    cmd += ["-ed", f"{t_coal}", str(src), str(dst)]
+                else:
+                    cmd += [
+                        "-ea",
+                        f"{t_coal}",
+                        str(dst),
+                        str(src),
+                        str(dst),
+                        f"{fraction}",
+                    ]
             elif "matrix_index" in e:
-                # Already handled above: time-varying migration not supported
                 if float(e.get("time", 0.0)) > 0.0:
-                    raise ValueError("discoal backend does not support time-varying migration rates (`-em`-like events); use msms/msprime.")
+                    raise ValueError(
+                        "discoal backend does not support time-varying migration rates (`-em`-like events); use msms/msprime."
+                    )
             elif "initial_size" in e or "growth_rate" in e:
                 i = pop_idx(e.get("population", e.get("population_id")))
                 if e.get("initial_size") is not None:
@@ -433,5 +518,29 @@ def discoal_command(
                 if e.get("growth_rate") is not None:
                     current_growth[i] = float(e["growth_rate"]) * upg
         last_t = t
+
+    if has_selection:
+        loc = float(sweep_pos) / float(L)
+        loc = 1e-6 if loc <= 0.0 else (1.0 - 1e-6 if loc >= 1.0 else loc)
+        alpha = float(selection_coeff) * fourNe / 2.0
+        if sweep_time in (None, "beginning"):
+            tau = 0.0
+        else:
+            tau_generations = float(sweep_time) / upg
+            tau = tau_generations / max(fourNe, 1e-12)
+        eff_N = max(1, int(round(Ne0)))
+        init_f = max(1.0 / max(float(ploidy) * Ne0, 1.0), 1e-6)
+        cmd += [
+            "-ws",
+            f"{tau}",
+            "-a",
+            f"{alpha}",
+            "-x",
+            f"{loc}",
+            "-N",
+            str(eff_N),
+            "-f",
+            f"{init_f}",
+        ]
 
     return " ".join(shlex.quote(str(x)) for x in cmd)

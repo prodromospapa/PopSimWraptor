@@ -15,6 +15,7 @@ from tqdm import tqdm
 import math
 import signal
 import sys
+import warnings
 
 parser = argparse.ArgumentParser(description="Train RAiSD-AI models for a species")
 parser.add_argument("--species", type=str, required=True,
@@ -321,17 +322,6 @@ model_std = species_std.get_demographic_model(demography)
 population_dict = {p: sample_counts[i] for i,p in enumerate(sim_populations)}
 
 model_dict = model_std.model.asdict()
-
-if engine == "msms":
-    events = model_dict.get("events", [])
-    for event in events:
-        if "proportion" in event:
-            fraction = float(event.get("proportion", 0.0))
-            if not math.isclose(fraction, 1.0, rel_tol=1e-9, abs_tol=0.0):
-                raise ValueError(
-                    "msms backend cannot reproduce partial mass-migration "
-                    f"(proportion={fraction}); use msprime or adjust the demography."
-                )
 
 if engine in ("slim", "msms", "discoal"):
     if sweep_pos:
