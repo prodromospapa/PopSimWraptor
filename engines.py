@@ -421,13 +421,57 @@ def discoal_command(
             [matrix[reorder_perm[i]][reorder_perm[j]] for j in range(len(pops))]
             for i in range(len(pops))
         ]
-        mig_change = any(
-            "matrix_index" in e and float(e.get("time", 0.0)) > 0.0 for e in events
-        )
-        if mig_change:
-            raise ValueError(
-                "discoal backend does not support time-varying migration rates; adjust demography or use msms/msprime."
+        mig_events = [
+            (float(e.get("time", 0.0)), idx, e)
+            for idx, e in enumerate(events)
+            if "matrix_index" in e
+        ]
+        if mig_events:
+            warnings.warn(
+                "Approximating time-varying migration with a time-averaged constant matrix for discoal; "
+                "consider msms/msprime for exact migration histories.",
+                RuntimeWarning,
             )
+            # accumulate time-weighted averages for each ordered population pair
+            current_rates = {
+                (i, j): float(migration_matrix[i][j])
+                for i in range(len(pops))
+                for j in range(len(pops))
+                if i != j
+            }
+            totals = {key: 0.0 for key in current_rates}
+            last_time = 0.0
+            last_dt = 0.0
+            total_duration = 0.0
+            for time, _, event in sorted(mig_events, key=lambda item: (item[0], item[1])):
+                time = max(0.0, float(time))
+                dt = time - last_time
+                if dt > 0.0:
+                    for key, rate in current_rates.items():
+                        totals[key] += rate * dt
+                    total_duration += dt
+                    last_dt = dt
+                ij = event.get("matrix_index")
+                rate_val = float(event.get("rate", 0.0))
+                if ij is None:
+                    for key in current_rates:
+                        current_rates[key] = rate_val
+                else:
+                    src = pop_idx(ij[0])
+                    dst = pop_idx(ij[1])
+                    current_rates[(src, dst)] = rate_val
+                last_time = time
+            final_dt = last_dt if last_dt > 0.0 else max(last_time, 1.0)
+            if final_dt > 0.0:
+                for key, rate in current_rates.items():
+                    totals[key] += rate * final_dt
+                total_duration += final_dt
+            if total_duration <= 0.0:
+                total_duration = 1.0
+            avg_matrix = [row[:] for row in migration_matrix]
+            for (i, j), acc in totals.items():
+                avg_matrix[i][j] = acc / total_duration
+            migration_matrix = avg_matrix
         if has_selection:
             has_migration = any(
                 i != j and float(migration_matrix[i][j])
@@ -507,10 +551,8 @@ def discoal_command(
                         f"{fraction}",
                     ]
             elif "matrix_index" in e:
-                if float(e.get("time", 0.0)) > 0.0:
-                    raise ValueError(
-                        "discoal backend does not support time-varying migration rates (`-em`-like events); use msms/msprime."
-                    )
+                # migration rate changes are folded into the averaged constant matrix above
+                continue
             elif "initial_size" in e or "growth_rate" in e:
                 i = pop_idx(e.get("population", e.get("population_id")))
                 if e.get("initial_size") is not None:
