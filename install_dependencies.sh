@@ -7,8 +7,9 @@
 #  2) Create/Update env from ./raisd-ai.yml (override: YML_PATH=...)
 #  3) Resolve env prefix & verify Java
 #  4) Install msms wrapper
-#  5) Install simulator wrappers (+ copy engines/ export/ for imports)
-#  6) Install/Update RAiSD-AI (skipped if toolchain absent)
+#  5) Build/install discoal simulator
+#  6) Install simulator wrappers (+ copy engines/ export/ for imports)
+#  7) Install/Update RAiSD-AI (skipped if toolchain absent)
 # -----------------------------------------------------------------------------
 
 set -eu
@@ -104,11 +105,12 @@ runq() {
 
 # ---------- Status flags for summary ------------------------------------------
 MSMS_STATUS="skipped"
+DISCOAL_STATUS="skipped"
 SIM_STATUS="skipped"
 RAISD_STATUS="skipped"
 
 # ---------- Plan ---------------------------------------------------------------
-TOTAL_STEPS=6
+TOTAL_STEPS=7
 CUR=0
 
 # 1) Detect conda
@@ -182,7 +184,36 @@ EOF
 }
 install_msms
 
-# 5) Install simulator wrappers (+ copy engines/export)
+# 5) Install discoal
+CUR=$((CUR+1)); step "$CUR" "$TOTAL_STEPS" "Building discoal"
+install_discoal() {
+  repo="$TOOLS_DIR/discoal"
+  if ! run_in_env sh -lc 'command -v git >/dev/null 2>&1 && command -v make >/dev/null 2>&1 && (command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1)'; then
+    warn "Compiler toolchain not available in env; skipping discoal."
+    return 0
+  fi
+  mkdir -p "$(dirname "$repo")"
+  if [ ! -d "$repo/.git" ]; then
+    rm -rf "$repo" || true
+    runq "Cloning discoal" run_in_env git clone --depth 1 https://github.com/kern-lab/discoal.git "$repo"
+  else
+    runq "Fetching discoal" run_in_env git -C "$repo" fetch --all --tags
+    runq "Updating discoal" run_in_env git -C "$repo" pull --ff-only
+  fi
+  runq "Building discoal" run_in_env sh -lc 'set -eu; cd "$1"; make -s discoal' sh "$repo"
+  runq "Installing discoal binary" sh -c '
+    set -eu
+    repo="$1"; bindir="$2"
+    [ -f "$repo/discoal" ]
+    cp "$repo/discoal" "$bindir/discoal"
+    chmod 0755 "$bindir/discoal"
+  ' sh "$repo" "$BIN_DIR"
+  DISCOAL_STATUS="ok"
+  ok "discoal ready."
+}
+install_discoal
+
+# 6) Install simulator wrappers (+ copy engines/export)
 CUR=$((CUR+1)); step "$CUR" "$TOTAL_STEPS" "Installing simulator wrapper"
 install_simulator() {
   src_dir="$(cd "$(dirname "$0")" && pwd)"
@@ -240,7 +271,7 @@ EOF
 }
 install_simulator
 
-# 6) RAiSD-AI (non-blocking)
+# 7) RAiSD-AI (non-blocking)
 CUR=$((CUR+1)); step "$CUR" "$TOTAL_STEPS" "Installing / updating RAiSD-AI"
 install_raisd() {
   repo="$TOOLS_DIR/RAiSD-AI"
@@ -276,9 +307,13 @@ install_raisd() {
   runq "Installing RAiSD-AI binaries (if built)" sh -c '
     set -eu
     repo="$1"; bindir="$2"
+    ai="$bindir/RAiSD-AI"
+    zlib="$bindir/RAiSD-AI-ZLIB"
     installed=0
-    if [ -e "$repo/bin/release/RAiSD-AI" ]; then cp -L "$repo/bin/release/RAiSD-AI" "$bindir/RAiSD-AI"; chmod 755 "$bindir/RAiSD-AI"; installed=1; fi
-    if [ -e "$repo/bin/release/RAiSD-AI-ZLIB" ]; then cp -L "$repo/bin/release/RAiSD-AI-ZLIB" "$bindir/RAiSD-AI-ZLIB"; chmod 755 "$bindir/RAiSD-AI-ZLIB"; installed=1; fi
+    if [ -e "$repo/bin/release/RAiSD-AI" ]; then cp -L "$repo/bin/release/RAiSD-AI" "$ai"; chmod 755 "$ai"; installed=1; fi
+    if [ -e "$repo/bin/release/RAiSD-AI-ZLIB" ]; then cp -L "$repo/bin/release/RAiSD-AI-ZLIB" "$zlib"; chmod 755 "$zlib"; installed=1; fi
+    if [ ! -x "$ai" ] && [ -x "$zlib" ]; then ln -sf RAiSD-AI-ZLIB "$ai"; installed=1; fi
+    if [ ! -x "$zlib" ] && [ -x "$ai" ]; then ln -sf RAiSD-AI "$zlib"; installed=1; fi
     [ "$installed" -eq 0 ] && exit 0 || exit 0
   ' sh "$repo" "$BIN_DIR"
   if [ -x "$BIN_DIR/RAiSD-AI" ] || [ -x "$BIN_DIR/RAiSD-AI-ZLIB" ]; then RAISD_STATUS="ok"; fi
@@ -290,6 +325,7 @@ install_raisd || true
 printf "\n%s %s (elapsed %s)\n" "🎉" "All tools installed into env." "$(elapsed)"
 printf "\n%s" "┌──────────────── Installation Summary ────────────────┐"
 printf "\n│ %-22s : %s" "msms" "$MSMS_STATUS"
+printf "\n│ %-22s : %s" "discoal" "$DISCOAL_STATUS"
 printf "\n│ %-22s : %s" "simulator wrappers" "$SIM_STATUS"
 printf "\n│ %-22s : %s" "RAiSD-AI" "$RAISD_STATUS"
 printf "\n%s\n\n" "└──────────────────────────────────────────────────────┘"

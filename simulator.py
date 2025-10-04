@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import stdpopsim as sps
-from engines import msprime_simulation,slim_simulate, msms_command
+from engines import msprime_simulation, slim_simulate, msms_command, discoal_command
 from export import ts2ms, ts2xcf, msms2ms, msms_chunk_to_xcf, format_metadata, ts2sfs, msms2sfs
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import os
@@ -19,8 +19,9 @@ import sys
 parser = argparse.ArgumentParser(description="Train RAiSD-AI models for a species")
 parser.add_argument("--species", type=str, required=True,
                     help="Species id (stdpopsim short id) or full name, e.g. 'HomSap' or 'Homo sapiens'.")
-parser.add_argument("--engine", type=str, required=True, choices=["msprime", "slim","msms"],
-                    help="Simulation engine to use (default: msprime)")
+parser.add_argument("--engine", type=str, required=True,
+    choices=["msprime", "slim", "msms", "discoal"],
+    help="Simulation engine to use")
 parser.add_argument("--chromosome", type=str, required=True,
                     help="Chromosome to simulate")
 parser.add_argument("--length", type=int, default=None,
@@ -53,6 +54,13 @@ parser.add_argument("--sfs-normalized", action="store_true",
 
 parser.add_argument("--parallel", type=int, default=1,
                     help="Number of parallel processes to use (default: 1)")
+
+parser.add_argument(
+    "--discoal-growth-steps",
+    type=int,
+    default=12,
+    help="Number of checkpoints to approximate exponential growth for discoal (default: 12)",
+)
 
 parser.add_argument(
     "--replicates-per-job",
@@ -112,6 +120,9 @@ if sweep_time.isdigit():
 fixation_time = args.fixation_time
 selection_coeff = args.selection_coeff
 
+# discoal parameters
+growth_steps = args.discoal_growth_steps
+
 # slim parameters 
 slim_scaling_factor = args.slim_scaling_factor
 slim_burn_in = args.slim_burn_in
@@ -160,26 +171,44 @@ def output(
 
     results = []
 
-    if engine == "msms":
+    if engine in ["msms", "discoal"]:
         replicates = len(replicate_indices)
         collect_chunks = sfs or (output_format in ["ms", "ms.gz", "vcf", "vcf.gz", "bcf"])
 
         cache = msms_cache or {}
-        ms_command = msms_command(
-            species_std,
-            model_std,
-            chromosome,
-            length,
-            population_dict,
-            sweep_population,
-            sweep_pos,
-            sweep_time,
-            selection_coeff,
-            replicates=replicates,
-            contig=cache.get("contig"),
-            pop_models=cache.get("pop_models"),
-            demo_dict=cache.get("demo_dict"),
-        )
+        if engine == "discoal":
+            ms_command = discoal_command(
+                species_std,
+                model_std,
+                chromosome,
+                length,
+                population_dict,
+                sweep_population,
+                sweep_pos,
+                sweep_time,
+                selection_coeff,
+                replicates=replicates,
+                growth_steps=growth_steps,
+                contig=cache.get("contig"),
+                pop_models=cache.get("pop_models"),
+                demo_dict=cache.get("demo_dict"),
+            )
+        else:
+            ms_command = msms_command(
+                species_std,
+                model_std,
+                chromosome,
+                length,
+                population_dict,
+                sweep_population,
+                sweep_pos,
+                sweep_time,
+                selection_coeff,
+                replicates=replicates,
+                contig=cache.get("contig"),
+                pop_models=cache.get("pop_models"),
+                demo_dict=cache.get("demo_dict"),
+            )
 
         ms_chunks = msms2ms(ms_command, return_chunks=collect_chunks)
         if collect_chunks and len(ms_chunks) != replicates:
@@ -304,13 +333,13 @@ if engine == "msms":
                     f"(proportion={fraction}); use msprime or adjust the demography."
                 )
 
-if engine == "slim" or engine == "msms":
+if engine in ("slim", "msms", "discoal"):
     if sweep_pos:
         if not sweep_pos:
             raise ValueError("--sweep-pos must be specified for sweep simulations")
         if fixation_time < 0:
             raise ValueError("--fixation-time must be a non-negative integer")
-        if engine == "msms" and fixation_time > 0:
+        if engine in ("msms", "discoal") and fixation_time > 0:
             raise ValueError("--fixation-time must be 0 when using the msms engine")
         if selection_coeff <= 0:
             raise ValueError("--selection-coeff must be a positive number")
@@ -429,7 +458,8 @@ else:
     pass
 sfs_values = []
 
-executor_cls = ThreadPoolExecutor if engine == "msms" else ProcessPoolExecutor
+executor_cls = ThreadPoolExecutor if engine in ["msms", "discoal"] else ProcessPoolExecutor
+
 
 ms_sink = None
 if output_format in ["ms", "ms.gz"]:
@@ -439,7 +469,7 @@ if output_format in ["ms", "ms.gz"]:
     ms_sink = sink_open(sink_path, sink_mode)
 
 effective_job_size = 1
-if engine == "msms":
+if engine in ["msms", "discoal"]:
     effective_job_size = min(replicates_per_job, simulations)
 
 replicate_indices = list(range(simulations))
