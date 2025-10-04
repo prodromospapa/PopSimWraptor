@@ -66,7 +66,7 @@ parser.add_argument(
     "--replicates-per-job",
     type=int,
     default=10,
-    help="Number of msms replicates to bundle per external call (default: 10)",
+    help="Number of msms or discoal replicates to bundle per external call (default: 10)",
 )
 
 parser.add_argument("--sweep-population", type=str,default=None,
@@ -339,7 +339,7 @@ if engine in ("slim", "msms", "discoal"):
             raise ValueError("--sweep-pos must be specified for sweep simulations")
         if fixation_time < 0:
             raise ValueError("--fixation-time must be a non-negative integer")
-        if engine in ("msms", "discoal") and fixation_time > 0:
+        if engine == "msms" and fixation_time > 0:
             raise ValueError("--fixation-time must be 0 when using the msms engine")
         if selection_coeff <= 0:
             raise ValueError("--selection-coeff must be a positive number")
@@ -424,7 +424,13 @@ metadata = {
     "length": length,
     "ploidy": ploidy,
     "chromosome": chromosome}
-if (engine == "slim" or engine == "msms") and (sweep_population or sweep_pos or sweep_time != "beginning" or fixation_time != 0 or selection_coeff != 0.1):
+if engine in ("slim", "msms", "discoal") and (
+    sweep_population
+    or sweep_pos
+    or sweep_time != "beginning"
+    or fixation_time != 0
+    or selection_coeff != 0.1
+):
     # selection
     metadata.update({
         "sweep_pos_bp": sweep_pos,
