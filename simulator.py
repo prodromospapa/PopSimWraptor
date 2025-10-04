@@ -474,18 +474,30 @@ if output_format in ["ms", "ms.gz"]:
     sink_open = gzip.open if output_format == "ms.gz" else open
     ms_sink = sink_open(sink_path, sink_mode)
 
-effective_job_size = 1
-if engine in ["msms", "discoal"]:
-    effective_job_size = min(replicates_per_job, simulations)
-
 replicate_indices = list(range(simulations))
 if simulations == 1:
-    replicate_indices = [None]
+    # single simulation: preserve the existing "None" sentinel used elsewhere
+    jobs = [[None]]
+else:
+    if engine in ["msms", "discoal"]:
+        # evenly distribute simulations into up to n_jobs where each job has at most
+        # `replicates_per_job` simulations. If simulations don't divide evenly, the
+        # first `rem` jobs get one extra replicate (more even distribution).
+        max_per_job = max(1, replicates_per_job)
+        n_jobs = max(1, math.ceil(simulations / max_per_job))
+        base = simulations // n_jobs
+        rem = simulations % n_jobs
 
-jobs = [
-    replicate_indices[i : i + effective_job_size]
-    for i in range(0, simulations, effective_job_size)
-]
+        jobs = []
+        idx = 0
+        for j in range(n_jobs):
+            sz = base + (1 if j < rem else 0)
+            if sz > 0:
+                jobs.append(replicate_indices[idx : idx + sz])
+                idx += sz
+    else:
+        # non-batched engines: one simulation per job
+        jobs = [[i] for i in replicate_indices]
 
 pending_ms = {}
 next_ms_index = 0
