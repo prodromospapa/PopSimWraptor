@@ -289,6 +289,7 @@ def discoal_command(
     sweep_pos=None,
     sweep_time=None,
     selection_coeff=None,
+    fixation_time=None,
     replicates: int = 1,
     contig=None,
     pop_models: Optional[Sequence] = None,
@@ -523,11 +524,16 @@ def discoal_command(
         loc = float(sweep_pos) / float(L)
         loc = 1e-6 if loc <= 0.0 else (1.0 - 1e-6 if loc >= 1.0 else loc)
         alpha = float(selection_coeff) * fourNe / 2.0
-        if sweep_time in (None, "beginning"):
-            tau = 0.0
+
+        if fixation_time not in (None, 0):
+            tau_source = float(fixation_time)
+        elif sweep_time in (None, "beginning"):
+            tau_source = 0.0
         else:
-            tau_generations = float(sweep_time) / upg
-            tau = tau_generations / max(fourNe, 1e-12)
+            tau_source = float(sweep_time)
+
+        tau_generations = tau_source / upg
+        tau = tau_generations / max(fourNe, 1e-12)
         eff_N = max(1, int(round(Ne0)))
         init_f = max(1.0 / max(float(ploidy) * Ne0, 1.0), 1e-6)
         cmd += [

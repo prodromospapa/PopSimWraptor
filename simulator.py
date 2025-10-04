@@ -164,6 +164,7 @@ def output(
     sfs=False,
     folded=False,
     sfs_normalized=False,
+    fixation_time=0,
     msms_cache=None,
 ):
     replicate_indices = list(replicate_indices or [])
@@ -188,6 +189,7 @@ def output(
                 sweep_pos,
                 sweep_time,
                 selection_coeff,
+                fixation_time,
                 replicates=replicates,
                 growth_steps=growth_steps,
                 contig=cache.get("contig"),
@@ -358,6 +360,16 @@ if engine in ("slim", "msms", "discoal"):
         if sweep_time > sweep_pop_start_time:
             raise ValueError(f"--sweep-time {sweep_time} is older than the start time of the sweep population {sweep_population} ({sweep_pop_start_time})")
 
+        if fixation_time >= sweep_pop_start_time:
+            raise ValueError(
+                f"--fixation-time {fixation_time} must be younger than the start time of {sweep_population} ({sweep_pop_start_time})"
+            )
+
+        if isinstance(sweep_time, (int, float)) and fixation_time >= sweep_time:
+            raise ValueError(
+                f"--fixation-time {fixation_time} must be younger than --sweep-time {sweep_time}"
+            )
+
 # check populations 
 
 sampling_dict = {}
@@ -511,6 +523,7 @@ try:
                 sfs,
                 folded,
                 sfs_normalized,
+                fixation_time,
                 msms_cache,
             )
             for job in jobs
