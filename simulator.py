@@ -124,7 +124,7 @@ selection_coeff = args.selection_coeff
 # discoal parameters
 growth_steps = args.discoal_growth_steps
 
-# slim parameters 
+# slim parameters
 slim_scaling_factor = args.slim_scaling_factor
 slim_burn_in = args.slim_burn_in
 
@@ -211,6 +211,7 @@ def output(
                 contig=cache.get("contig"),
                 pop_models=cache.get("pop_models"),
                 demo_dict=cache.get("demo_dict"),
+                ref_population_name=ref_population,
             )
 
         ms_chunks = msms2ms(ms_command, return_chunks=collect_chunks)
@@ -288,7 +289,6 @@ elif species in species_dict.values():
 else:
     raise ValueError(f"Unknown species: {species}")
 
-
 species_std = sps.get_species(species_id)
 demographic_models = {
         m.id: [p.name for p in species_std.get_demographic_model(m.id).populations]
@@ -318,7 +318,6 @@ for sim in sim_populations:
     if sim not in demographic_models[demography]:
         raise ValueError(f"Unknown population: {sim} for demographic model: {demography}, "
                          f"available populations: {', '.join(demographic_models[demography])}")
-
 
 model_std = species_std.get_demographic_model(demography)
 population_dict = {p: sample_counts[i] for i,p in enumerate(sim_populations)}
@@ -467,7 +466,6 @@ else:
 sfs_values = []
 
 executor_cls = ThreadPoolExecutor if engine in ["msms", "discoal"] else ProcessPoolExecutor
-
 
 ms_sink = None
 if output_format in ["ms", "ms.gz"]:

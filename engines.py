@@ -79,6 +79,7 @@ def msms_command(
     contig=None,
     pop_models: Optional[Sequence] = None,
     demo_dict: Optional[Dict] = None,
+    ref_population_name: Optional[str] = None,
 ):
     def pop_idx(name):
         if isinstance(name, int):
@@ -107,6 +108,11 @@ def msms_command(
     n = sum(counts) if counts else ploidy
 
     ref = next((i for i, c in enumerate(counts) if c > 0), 0)
+    if ref_population_name is not None:
+        for i, p in enumerate(pops):
+            if p.name == ref_population_name:
+                ref = i
+                break
     Ne0 = float(getattr(pops[ref], "initial_size", 1.0) or 1.0)
     fourNe = 2.0 * ploidy * Ne0
 
@@ -183,6 +189,8 @@ def msms_command(
     # emit an -es (split) to create a temporary population and immediately -ej it
     # into the destination to model a pulse admixture backward in time.
     temp_pop_counter = 0
+    merge_eps = 1e-9
+    off_pops = set()
     for e in events:
         t = (float(e.get("time", 0.0)) / upg) / max(fourNe, 1e-12)
         if "proportion" in e:
@@ -193,10 +201,11 @@ def msms_command(
                 # full merge as before
                 cmd += [
                     "-ej",
-                    f"{t}",
+                    f"{t + merge_eps}",
                     str(src_idx + 1),
                     str(dst_idx + 1),
                 ]
+                off_pops.add(src_idx)
             else:
                 # create a temporary population by splitting src; set p = fraction remaining
                 # in the original population so the new population holds the migrating fraction
@@ -210,10 +219,9 @@ def msms_command(
                 # new temporary population index (1-based)
                 new_temp_idx = len(pops) + temp_pop_counter + 1
                 # small epsilon to ensure split happens before join
-                eps = 1e-12
                 cmd += [
                     "-ej",
-                    f"{t + eps}",
+                    f"{t + merge_eps}",
                     str(new_temp_idx),
                     str(dst_idx + 1),
                 ]
@@ -224,6 +232,8 @@ def msms_command(
             if ij is None:
                 cmd += ["-eM", f"{t}", f"{rate}"]
             else:
+                if (pop_idx(ij[0]) in off_pops) or (pop_idx(ij[1]) in off_pops):
+                    continue
                 cmd += [
                     "-em",
                     f"{t}",
@@ -233,6 +243,8 @@ def msms_command(
                 ]
         elif "initial_size" in e or "growth_rate" in e:
             i = pop_idx(e.get("population", e.get("population_id")))
+            if i in off_pops:
+                continue
             if e.get("initial_size") is not None:
                 cmd += ["-en", f"{t}", str(i + 1), f"{float(e['initial_size']) / Ne0}"]
             if e.get("growth_rate") is not None:
