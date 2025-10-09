@@ -33,7 +33,7 @@ def extended_events_define(contig, sweep_pos, sweep_population,sweep_time,fixati
     )
 
 def slim_simulate(species_std,model_std,chromosome,length,population_dict,slim_scaling_factor,slim_burn_in,sweep_population=None,sweep_pos=None,sweep_time=None,fixation_time=None,selection_coeff=None):
-    contig = species_std.get_contig(chromosome,mutation_rate=model_std.mutation_rate,right=length)
+    contig = species_std.get_contig(chromosome,mutation_rate=model_std.mutation_rate,right=length,recombination_rate=model_std.recombination_rate)
     engine_std = sps.get_engine("slim")
     if sweep_population is not None and sweep_pos is not None and sweep_time is not None and fixation_time is not None:
         extended_events = extended_events_define(contig,sweep_pos,sweep_population,sweep_time,fixation_time,selection_coeff)
@@ -52,7 +52,7 @@ def slim_simulate(species_std,model_std,chromosome,length,population_dict,slim_s
 
 
 def msprime_simulation(species_std,model_std,chromosome,length,population_dict):
-    contig = species_std.get_contig(chromosome,mutation_rate=model_std.mutation_rate,right=length)
+    contig = species_std.get_contig(chromosome,mutation_rate=model_std.mutation_rate,right=length,recombination_rate=model_std.recombination_rate)
     engine_std = sps.get_engine("msprime")
     ts =  engine_std.simulate(
             model_std,
