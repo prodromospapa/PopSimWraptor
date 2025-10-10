@@ -57,10 +57,15 @@ parser.add_argument("--parallel", type=int, default=1,
                     help="Number of parallel processes to use (default: 1)")
 
 parser.add_argument(
-    "--discoal-growth-steps",
+    "--growth-steps",
     type=int,
     default=12,
-    help="Number of checkpoints to approximate exponential growth for discoal (default: 12)",
+    help=(
+        "Number of checkpoints used to approximate exponential growth when invoking "
+        "discoal (via -ws/-en) and msms (as a substitute for large -g coefficients). "
+        "Higher values better track rapid demographic changes at the cost of longer commands "
+        "(default: 12)."
+    ),
 )
 
 parser.add_argument(
@@ -121,8 +126,8 @@ if sweep_time.isdigit():
 fixation_time = args.fixation_time
 selection_coeff = args.selection_coeff
 
-# discoal parameters
-growth_steps = args.discoal_growth_steps
+# growth approximation for msms/discoal
+growth_steps = args.growth_steps
 
 # slim parameters
 slim_scaling_factor = args.slim_scaling_factor
@@ -208,6 +213,7 @@ def output(
                 sweep_time,
                 selection_coeff,
                 replicates=replicates,
+                growth_steps=growth_steps,
                 contig=cache.get("contig"),
                 pop_models=cache.get("pop_models"),
                 demo_dict=cache.get("demo_dict"),

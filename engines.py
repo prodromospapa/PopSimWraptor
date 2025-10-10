@@ -80,6 +80,7 @@ def msms_command(
     pop_models: Optional[Sequence] = None,
     demo_dict: Optional[Dict] = None,
     ref_population_name: Optional[str] = None,
+    growth_steps: int = 12,
 ):
     def pop_idx(name):
         if isinstance(name, int):
@@ -130,6 +131,17 @@ def msms_command(
     events: Iterable[Dict] = list(
         sorted(demo_dict.get("events", []), key=lambda e: e.get("time", 0.0))
     )
+    events_per_pop: Dict[int, list] = {i: [] for i in range(len(pops))}
+    for ev in events:
+        pop_target = ev.get("population")
+        idx = None
+        if pop_target is not None:
+            idx = pop_idx(pop_target)
+        elif ev.get("population_id") is not None:
+            idx = pop_idx(ev.get("population_id"))
+        if idx is not None and 0 <= idx < len(pops):
+            events_per_pop.setdefault(idx, []).append(ev)
+
     num_temp_pops = 0
     for e in events:
         if "proportion" in e:
@@ -166,12 +178,64 @@ def msms_command(
     else:
         upg = 1.0
 
+    additional_events = []
+    growth_threshold = 5_000
+    skip_growth = set()
+
     for i, p in enumerate(pops):
         if getattr(p, "initial_size", Ne0) != Ne0:
             cmd += ["-n", str(i + 1), f"{float(p.initial_size) / Ne0}"]
         g = float(getattr(p, "growth_rate", 0.0) or 0.0) * upg
-        if g:
-            cmd += ["-g", str(i + 1), f"{g * fourNe}"]
+        if not g:
+            continue
+
+        scaled_growth = g * fourNe
+        if abs(scaled_growth) <= growth_threshold or not events_per_pop.get(i):
+            cmd += ["-g", str(i + 1), f"{scaled_growth}"]
+            continue
+
+        # Approximate rapid growth with piecewise constant size changes.
+        skip_growth.add(i)
+        segments = []
+        size_at_start = float(getattr(p, "initial_size", Ne0) or Ne0)
+        last_time = 0.0
+        current_rate = g
+        for ev in events_per_pop.get(i, []):
+            raw_time = float(ev.get("time", 0.0))
+            t_gen = raw_time / upg
+            if t_gen <= last_time:
+                continue
+            if current_rate:
+                segments.append((last_time, t_gen, current_rate, size_at_start))
+                duration = t_gen - last_time
+                size_at_start = size_at_start * math.exp(-current_rate * duration)
+            if ev.get("initial_size") is not None:
+                size_at_start = float(ev["initial_size"])
+            if ev.get("growth_rate") is not None:
+                new_rate = ev.get("growth_rate")
+                current_rate = float(new_rate) if new_rate is not None else 0.0
+            last_time = t_gen
+
+        for start, end, rate_seg, start_size in segments:
+            if not rate_seg or end is None or end <= start:
+                continue
+            step_times = [
+                start + (end - start) * (k / growth_steps)
+                for k in range(1, growth_steps)
+            ]
+            for t_gen in step_times:
+                size = start_size * math.exp(-rate_seg * (t_gen - start))
+                additional_events.append(
+                    {
+                        "time": t_gen * upg,
+                        "initial_size": size,
+                        "population": pops[i].name,
+                    }
+                )
+
+    if additional_events:
+        events.extend(additional_events)
+        events.sort(key=lambda e: e.get("time", 0.0))
 
     migration_matrix = demo_dict.get("migration_matrix")
     if migration_matrix is not None:
@@ -248,7 +312,8 @@ def msms_command(
             if e.get("initial_size") is not None:
                 cmd += ["-en", f"{t}", str(i + 1), f"{float(e['initial_size']) / Ne0}"]
             if e.get("growth_rate") is not None:
-                cmd += ["-eg", f"{t}", str(i + 1), f"{float(e['growth_rate']) * upg * fourNe}"]
+                if i not in skip_growth:
+                    cmd += ["-eg", f"{t}", str(i + 1), f"{float(e['growth_rate']) * upg * fourNe}"]
 
     cmd += ["-oFP", "0.000000000000000000000000000000000"] # increase precision of floating point output
 
