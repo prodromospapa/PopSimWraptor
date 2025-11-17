@@ -2,6 +2,7 @@ name: raisd-ai
 channels:
   - conda-forge
   - bioconda
+  - pytorch
   - defaults
 dependencies:
   - python=3.10
@@ -24,7 +25,6 @@ dependencies:
   - htslib>=1.18
   - pysam>=0.22
   - gsl>=2.7
-  - scrm
   - slim=4.1
   - msprime>=1.2,<1.4
   - pyslim>=1.0.4,<1.2
@@ -57,6 +57,6 @@ dependencies:
   - setuptools>=70
   - wheel>=0.41
   - pip:
-    - tensorflow==2.13.1
-    - stdpopsim==0.3.0
-    - biomart==0.9.2
+      - tensorflow==2.13.1
+      - stdpopsim==0.3.0
+      - biomart==0.9.2

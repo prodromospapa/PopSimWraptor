@@ -97,6 +97,9 @@ parser.add_argument(
     "--progress", action="store_true",
     help="Show tqdm progress bar (use --no-progress to hide)")
 
+parser.add_argument(
+    "--get-commands", action="store_true",
+    help="Print the msms/discoal commands that would be executed")
 args = parser.parse_args()
 
 
@@ -219,6 +222,10 @@ def output(
                 demo_dict=cache.get("demo_dict"),
                 ref_population_name=ref_population,
             )
+        # improve implementation
+        if args.get_commands:
+            print(ms_command)
+        #
 
         ms_chunks = msms2ms(ms_command, return_chunks=collect_chunks)
         if collect_chunks and len(ms_chunks) != replicates:
@@ -509,33 +516,29 @@ pending_ms = {}
 next_ms_index = 0
 
 try:
-    with executor_cls(max_workers=parallel) as ex:
-        futs = [
-            ex.submit(
-                output,
-                engine,
-                species_std,
-                model_std,
-                chromosome,
-                length,
-                population_dict,
-                metadata,
-                info_file,
-                output_file,
-                output_format,
-                job,
-                sfs,
-                folded,
-                sfs_normalized,
-                fixation_time,
-                msms_cache,
-            )
-            for job in jobs
-        ]
+    if parallel <= 1:
+        # Serial execution path avoids ProcessPoolExecutor (important for restricted environments)
         with tqdm(total=simulations, disable=not show_progress) as pbar:
-            for f in as_completed(futs):
+            for job in jobs:
                 try:
-                    job_results = f.result()
+                    job_results = output(
+                        engine,
+                        species_std,
+                        model_std,
+                        chromosome,
+                        length,
+                        population_dict,
+                        metadata,
+                        info_file,
+                        output_file,
+                        output_format,
+                        job,
+                        sfs,
+                        folded,
+                        sfs_normalized,
+                        fixation_time,
+                        msms_cache,
+                    )
                 except Exception:
                     pbar.close()
                     raise
@@ -550,6 +553,67 @@ try:
                         sfs_values.append((idx, sfs_result))
 
                 pbar.update(len(job_results))
+    else:
+        executor_candidates = [executor_cls]
+        if executor_cls is ProcessPoolExecutor:
+            executor_candidates.append(ThreadPoolExecutor)
+
+        last_exc = None
+        for exec_cls in executor_candidates:
+            try:
+                with exec_cls(max_workers=parallel) as ex:
+                    futs = [
+                        ex.submit(
+                            output,
+                            engine,
+                            species_std,
+                            model_std,
+                            chromosome,
+                            length,
+                            population_dict,
+                            metadata,
+                            info_file,
+                            output_file,
+                            output_format,
+                            job,
+                            sfs,
+                            folded,
+                            sfs_normalized,
+                            fixation_time,
+                            msms_cache,
+                        )
+                        for job in jobs
+                    ]
+                    with tqdm(total=simulations, disable=not show_progress) as pbar:
+                        for f in as_completed(futs):
+                            try:
+                                job_results = f.result()
+                            except Exception:
+                                pbar.close()
+                                raise
+
+                            for idx, ms_chunk, sfs_result in job_results:
+                                if ms_sink and ms_chunk:
+                                    pending_ms[idx] = ms_chunk
+                                    while next_ms_index in pending_ms:
+                                        ms_sink.write(pending_ms.pop(next_ms_index))
+                                        next_ms_index += 1
+                                if sfs_result is not None:
+                                    sfs_values.append((idx, sfs_result))
+
+                            pbar.update(len(job_results))
+                break
+            except (PermissionError, OSError) as exc:
+                last_exc = exc
+                if exec_cls is ThreadPoolExecutor:
+                    raise
+                warnings.warn(
+                    f"Falling back to thread-based parallelism because process-based executor "
+                    f"could not start ({exc})."
+                )
+        else:
+            if last_exc:
+                raise last_exc
 finally:
     if ms_sink:
         try:
