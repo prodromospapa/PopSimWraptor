@@ -20,6 +20,22 @@ if "ignore_cleanup_errors" not in inspect.signature(tempfile.TemporaryDirectory.
 warnings.filterwarnings("ignore")
 
 
+def _get_contig_with_model_rates(species_std, model_std, chromosome, length):
+    contig_kwargs = {}
+    if length is not None:
+        contig_kwargs["right"] = length
+
+    mutation_rate = getattr(model_std, "mutation_rate", None)
+    if mutation_rate is not None:
+        contig_kwargs["mutation_rate"] = mutation_rate
+
+    recombination_rate = getattr(model_std, "recombination_rate", None)
+    if recombination_rate is not None:
+        contig_kwargs["recombination_rate"] = recombination_rate
+
+    return species_std.get_contig(chromosome, **contig_kwargs)
+
+
 def extended_events_define(contig, sweep_pos, sweep_population,sweep_time,fixation_time,selection_coeff):
     id = f"hard_sweep_{sweep_population}"
     contig.add_single_site(id=id, coordinate=sweep_pos)
@@ -33,7 +49,7 @@ def extended_events_define(contig, sweep_pos, sweep_population,sweep_time,fixati
     )
 
 def slim_simulate(species_std,model_std,chromosome,length,population_dict,slim_scaling_factor,slim_burn_in,sweep_population=None,sweep_pos=None,sweep_time=None,fixation_time=None,selection_coeff=None):
-    contig = species_std.get_contig(chromosome,mutation_rate=model_std.mutation_rate,right=length,recombination_rate=model_std.recombination_rate)
+    contig = _get_contig_with_model_rates(species_std, model_std, chromosome, length)
     engine_std = sps.get_engine("slim")
     if sweep_population is not None and sweep_pos is not None and sweep_time is not None and fixation_time is not None:
         extended_events = extended_events_define(contig,sweep_pos,sweep_population,sweep_time,fixation_time,selection_coeff)
@@ -45,20 +61,20 @@ def slim_simulate(species_std,model_std,chromosome,length,population_dict,slim_s
                         extended_events=extended_events,
                         slim_scaling_factor=slim_scaling_factor,
                         slim_burn_in=slim_burn_in)
-    t = ts.tables
+    t = ts.dump_tables()
     t.sequence_length = float(length)
     ts = t.tree_sequence()
     return ts
 
 
 def msprime_simulation(species_std,model_std,chromosome,length,population_dict):
-    contig = species_std.get_contig(chromosome,mutation_rate=model_std.mutation_rate,right=length,recombination_rate=model_std.recombination_rate)
+    contig = _get_contig_with_model_rates(species_std, model_std, chromosome, length)
     engine_std = sps.get_engine("msprime")
     ts =  engine_std.simulate(
             model_std,
             contig,
             population_dict)
-    t = ts.tables
+    t = ts.dump_tables()
     t.sequence_length = float(length)
     ts = t.tree_sequence()
     return ts
@@ -91,9 +107,7 @@ def msms_command(
         return 0
 
     if contig is None:
-        contig = species_std.get_contig(
-            chromosome, mutation_rate=model_std.mutation_rate, right=length
-        )
+        contig = _get_contig_with_model_rates(species_std, model_std, chromosome, length)
 
     if demo_dict is None:
         demo_dict = model_std.model.asdict()
@@ -384,16 +398,11 @@ def discoal_command(
       - Size changes: -en time popID sizeRel
       - Migration: only *constant* rates supported (`-m` and `-M`); time-varying migration is not supported
       - Selective sweeps (stochastic, via `-ws`) are supported when requested.
-        discoal only models sweeps in population 0 and disallows migration during
-        the sweep; we reorder populations so the requested sweep population is
-        first and reject demographies with migration under selection.
     """
     has_selection = sweep_pos is not None
 
     if contig is None:
-        contig = species_std.get_contig(
-            chromosome, mutation_rate=model_std.mutation_rate, right=length
-        )
+        contig = _get_contig_with_model_rates(species_std, model_std, chromosome, length)
 
     if demo_dict is None:
         demo_dict = model_std.model.asdict()
@@ -486,23 +495,33 @@ def discoal_command(
     )
 
     migration_matrix_raw = demo_dict.get("migration_matrix")
+    mig_events = [
+        (float(e.get("time", 0.0)), idx, e)
+        for idx, e in enumerate(events)
+        if "matrix_index" in e
+    ]
+
     migration_matrix = None
-    if migration_matrix_raw is not None:
-        matrix = [list(row) for row in migration_matrix_raw]
+    if migration_matrix_raw is not None or mig_events:
         expected = len(orig_pops)
-        if expected and len(matrix) != expected:
-            raise ValueError(
-                "discoal migration matrix size does not align with population definitions."
-            )
+        if migration_matrix_raw is None:
+            matrix = [[0.0] * expected for _ in range(expected)]
+        else:
+            matrix = [list(row) for row in migration_matrix_raw]
+            if expected and len(matrix) != expected:
+                raise ValueError(
+                    "discoal migration matrix size does not align with population definitions."
+                )
+            if expected and any(len(row) != expected for row in matrix):
+                raise ValueError(
+                    "discoal migration matrix must be square and align with population definitions."
+                )
+
         migration_matrix = [
-            [matrix[reorder_perm[i]][reorder_perm[j]] for j in range(len(pops))]
+            [float(matrix[reorder_perm[i]][reorder_perm[j]]) for j in range(len(pops))]
             for i in range(len(pops))
         ]
-        mig_events = [
-            (float(e.get("time", 0.0)), idx, e)
-            for idx, e in enumerate(events)
-            if "matrix_index" in e
-        ]
+
         if mig_events:
             warnings.warn(
                 "Approximating time-varying migration with a time-averaged constant matrix for discoal; "
@@ -538,6 +557,7 @@ def discoal_command(
                     dst = pop_idx(ij[1])
                     current_rates[(src, dst)] = rate_val
                 last_time = time
+
             final_dt = last_dt if last_dt > 0.0 else max(last_time, 1.0)
             if final_dt > 0.0:
                 for key, rate in current_rates.items():
@@ -545,25 +565,17 @@ def discoal_command(
                 total_duration += final_dt
             if total_duration <= 0.0:
                 total_duration = 1.0
+
             avg_matrix = [row[:] for row in migration_matrix]
             for (i, j), acc in totals.items():
                 avg_matrix[i][j] = acc / total_duration
             migration_matrix = avg_matrix
-        if has_selection:
-            has_migration = any(
-                i != j and float(migration_matrix[i][j])
-                for i in range(len(migration_matrix))
-                for j in range(len(migration_matrix[i]))
-            )
-            if has_migration:
-                raise ValueError(
-                    "discoal backend does not support migration when a selective sweep is simulated; use msms or adjust the demography."
-                )
-        else:
-            for i, row in enumerate(migration_matrix):
-                for j, rate in enumerate(row):
-                    if i != j and rate:
-                        cmd += ["-m", str(i), str(j), f"{float(rate) * upg * fourNe}"]
+
+    if migration_matrix is not None:
+        for i, row in enumerate(migration_matrix):
+            for j, rate in enumerate(row):
+                if i != j and rate:
+                    cmd += ["-m", str(i), str(j), f"{float(rate) * upg * fourNe}"]
 
     def add_en(t_generations: float, pop_index: int, Ne_abs: float):
         t = (float(t_generations) / upg) / max(fourNe, 1e-12)
@@ -588,11 +600,11 @@ def discoal_command(
             add_en(0.0, i, float(getattr(p, "initial_size", Ne0)))
 
     if has_selection:
-        for e in events:
-            if "matrix_index" in e or "proportion" in e:
-                raise ValueError(
-                    "discoal backend does not support migration or admixture events when sweeps are enabled; use msms or adjust the demography."
-                )
+        # for e in events:
+        #     if "matrix_index" in e or "proportion" in e:
+        #         raise ValueError(
+        #             "discoal backend does not support migration or admixture events when sweeps are enabled; use msms or adjust the demography."
+        #         )
         if sweep_population not in name_to_index:
             raise ValueError(
                 f"sweep population '{sweep_population}' is not part of the demographic model."

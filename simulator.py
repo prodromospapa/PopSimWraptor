@@ -225,6 +225,7 @@ def output(
         # improve implementation
         if args.get_commands:
             print(ms_command)
+            return [(idx, None, None) for idx in replicate_indices]
         #
 
         ms_chunks = msms2ms(ms_command, return_chunks=collect_chunks)
