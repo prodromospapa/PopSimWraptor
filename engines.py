@@ -528,7 +528,23 @@ def discoal_command(
                 "consider msms/msprime for exact migration histories.",
                 RuntimeWarning,
             )
-            # accumulate time-weighted averages for each ordered population pair
+            # Build merge timeline: record the earliest time each population is
+            # fully absorbed into another (proportion == 1.0 event).  Migration
+            # between a pair is only meaningful while BOTH populations exist as
+            # separate entities, so we cap accumulation at the earlier of the
+            # two merge times.
+            pop_merge_time = {i: math.inf for i in range(len(pops))}
+            for e in events:
+                if "proportion" in e:
+                    fraction = float(e.get("proportion", 0.0))
+                    if math.isclose(fraction, 1.0, rel_tol=1e-9, abs_tol=0.0):
+                        src_m = pop_idx(e.get("source"))
+                        t_m = float(e.get("time", 0.0))
+                        if t_m < pop_merge_time.get(src_m, math.inf):
+                            pop_merge_time[src_m] = t_m
+
+            # accumulate time-weighted averages for each ordered population pair,
+            # respecting each pair's effective lifetime
             current_rates = {
                 (i, j): float(migration_matrix[i][j])
                 for i in range(len(pops))
@@ -536,16 +552,23 @@ def discoal_command(
                 if i != j
             }
             totals = {key: 0.0 for key in current_rates}
+            pair_durations = {key: 0.0 for key in current_rates}
             last_time = 0.0
             last_dt = 0.0
-            total_duration = 0.0
             for time, _, event in sorted(mig_events, key=lambda item: (item[0], item[1])):
                 time = max(0.0, float(time))
                 dt = time - last_time
                 if dt > 0.0:
                     for key, rate in current_rates.items():
-                        totals[key] += rate * dt
-                    total_duration += dt
+                        i_pop, j_pop = key
+                        alive_until = min(
+                            pop_merge_time.get(i_pop, math.inf),
+                            pop_merge_time.get(j_pop, math.inf),
+                        )
+                        eff_dt = max(0.0, min(time, alive_until) - last_time)
+                        if eff_dt > 0.0:
+                            totals[key] += rate * eff_dt
+                            pair_durations[key] += eff_dt
                     last_dt = dt
                 ij = event.get("matrix_index")
                 rate_val = float(event.get("rate", 0.0))
@@ -561,14 +584,20 @@ def discoal_command(
             final_dt = last_dt if last_dt > 0.0 else max(last_time, 1.0)
             if final_dt > 0.0:
                 for key, rate in current_rates.items():
-                    totals[key] += rate * final_dt
-                total_duration += final_dt
-            if total_duration <= 0.0:
-                total_duration = 1.0
+                    i_pop, j_pop = key
+                    alive_until = min(
+                        pop_merge_time.get(i_pop, math.inf),
+                        pop_merge_time.get(j_pop, math.inf),
+                    )
+                    eff_dt = max(0.0, min(last_time + final_dt, alive_until) - last_time)
+                    if eff_dt > 0.0:
+                        totals[key] += rate * eff_dt
+                        pair_durations[key] += eff_dt
 
             avg_matrix = [row[:] for row in migration_matrix]
             for (i, j), acc in totals.items():
-                avg_matrix[i][j] = acc / total_duration
+                dur = pair_durations.get((i, j), 0.0)
+                avg_matrix[i][j] = acc / dur if dur > 0.0 else 0.0
             migration_matrix = avg_matrix
 
     if migration_matrix is not None:
