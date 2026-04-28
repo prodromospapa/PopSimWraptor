@@ -234,18 +234,6 @@ It also checks that the requested sampling populations are valid for the chosen 
 
 Sweep simulations have extra restrictions enforced by the script, including valid sweep time, fixation time, and selection coefficient values.
 
-## Repository layout
-
-Only the files that are part of the live workflow are documented here:
-
-- `simulator.py` — command-line entry point
-- `engines.py` — `msprime`, `slim`, `msms`, and `discoal` integration
-- `export.py` — conversion helpers for `ms`, VCF/BCF, and SFS output
-- `install_dependencies.sh` — environment bootstrapper
-- `raisd-ai.yml` — conda environment specification
-
-Ignored directories such as `old/`, `junk/`, and `benchmark/` are not part of the supported runtime path.
-
 ## Tips
 
 - Use comma-separated values for `--sim-population` and `--sample-counts`.
