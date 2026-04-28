@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# raisd-ai conda environment is needed to run this script, which provides the necessary dependencies including stdpopsim, msprime, and SLiM.
 
 import stdpopsim as sps
 from engines import msprime_simulation, slim_simulate, msms_command, discoal_command

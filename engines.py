@@ -523,52 +523,89 @@ def discoal_command(
         ]
 
         if mig_events:
-            warnings.warn(
-                "Approximating time-varying migration with a time-averaged constant matrix for discoal; "
-                "consider msms/msprime for exact migration histories.",
-                RuntimeWarning,
-            )
-            # accumulate time-weighted averages for each ordered population pair
-            current_rates = {
-                (i, j): float(migration_matrix[i][j])
+            # Reconstruct per-pair rate timelines and compute a harmonic-weighted
+            # average bounded by T_merge (the time the rate permanently drops to zero,
+            # which in stdpopsim models coincides with a population merge handled by
+            # -ed).  The harmonic mean gives more weight to low-migration epochs, which
+            # dominate coalescent waiting times and produce Fst values closer to the
+            # msprime ground truth than a simple time-weighted average.
+            # For pairs whose rate never reaches zero we fall back to the harmonic
+            # average over the full timeline and warn.
+
+            pairs = [
+                (i, j)
                 for i in range(len(pops))
                 for j in range(len(pops))
                 if i != j
+            ]
+            # seed each pair with its t=0 rate
+            pair_timeline: Dict = {
+                key: [(0.0, float(migration_matrix[key[0]][key[1]]))]
+                for key in pairs
             }
-            totals = {key: 0.0 for key in current_rates}
-            last_time = 0.0
-            last_dt = 0.0
-            total_duration = 0.0
             for time, _, event in sorted(mig_events, key=lambda item: (item[0], item[1])):
-                time = max(0.0, float(time))
-                dt = time - last_time
-                if dt > 0.0:
-                    for key, rate in current_rates.items():
-                        totals[key] += rate * dt
-                    total_duration += dt
-                    last_dt = dt
+                t = max(0.0, float(time))
                 ij = event.get("matrix_index")
                 rate_val = float(event.get("rate", 0.0))
                 if ij is None:
-                    for key in current_rates:
-                        current_rates[key] = rate_val
+                    for key in pairs:
+                        pair_timeline[key].append((t, rate_val))
                 else:
-                    src = pop_idx(ij[0])
-                    dst = pop_idx(ij[1])
-                    current_rates[(src, dst)] = rate_val
-                last_time = time
-
-            final_dt = last_dt if last_dt > 0.0 else max(last_time, 1.0)
-            if final_dt > 0.0:
-                for key, rate in current_rates.items():
-                    totals[key] += rate * final_dt
-                total_duration += final_dt
-            if total_duration <= 0.0:
-                total_duration = 1.0
+                    key = (pop_idx(ij[0]), pop_idx(ij[1]))
+                    if key in pair_timeline:
+                        pair_timeline[key].append((t, rate_val))
 
             avg_matrix = [row[:] for row in migration_matrix]
-            for (i, j), acc in totals.items():
-                avg_matrix[i][j] = acc / total_duration
+            unbounded_pairs = []
+            for (i, j) in pairs:
+                tl = pair_timeline[(i, j)]  # [(time, rate), ...]
+
+                # Find T_merge: earliest time after which the rate stays zero
+                final_rate = tl[-1][1]
+                t_merge = None
+                if final_rate == 0.0:
+                    for k in range(len(tl) - 1, 0, -1):
+                        if tl[k][1] != 0.0:
+                            t_merge = tl[k + 1][0] if k + 1 < len(tl) else tl[k][0]
+                            break
+                    else:
+                        avg_matrix[i][j] = 0.0
+                        continue
+
+                segments = tl if t_merge is None else [bp for bp in tl if bp[0] <= t_merge]
+
+                if t_merge is None:
+                    unbounded_pairs.append((i, j))
+                    # extend last segment by its own duration as a heuristic tail
+                    last_dt = (segments[-1][0] - segments[-2][0]) if len(segments) > 1 else segments[-1][0]
+                    last_dt = last_dt if last_dt > 0.0 else max(segments[-1][0], 1.0)
+                    segments = list(segments) + [(segments[-1][0] + last_dt, 0.0)]
+
+                # Harmonic-weighted average: weight each epoch by dt/rate.
+                # Equivalent to: total_duration / sum(dt/rate).
+                # Epochs with rate=0 act as complete barriers and are skipped
+                # (they contribute infinite resistance; the harmonic mean tends to 0,
+                # but since T_merge already captures the zero-rate boundary we simply
+                # exclude zero-rate segments from the average).
+                total_dt = 0.0
+                sum_dt_over_rate = 0.0
+                for k in range(len(segments) - 1):
+                    t_start, rate = segments[k]
+                    dt = segments[k + 1][0] - t_start
+                    if dt > 0.0 and rate > 0.0:
+                        total_dt += dt
+                        sum_dt_over_rate += dt / rate
+
+                avg_matrix[i][j] = total_dt / sum_dt_over_rate if sum_dt_over_rate > 0.0 else 0.0
+
+            if unbounded_pairs:
+                warnings.warn(
+                    f"Approximating time-varying migration with a harmonic-weighted constant rate for discoal "
+                    f"(pairs without a clean zero-rate endpoint: {unbounded_pairs}); "
+                    "consider msms/msprime for exact migration histories.",
+                    RuntimeWarning,
+                )
+
             migration_matrix = avg_matrix
 
     if migration_matrix is not None:
