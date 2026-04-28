@@ -256,4 +256,4 @@ Ignored directories such as `old/`, `junk/`, and `benchmark/` are not part of th
 
 ## License
 
-Add license information here if you plan to publish the repository on GitHub.
+This repository is licensed under the MIT License. See `LICENSE` for the full text.
